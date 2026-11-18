@@ -45,6 +45,7 @@ await sleep(6000);
 console.log("intro hidden:", await ev("document.getElementById('intro').hidden"));
 await shot("02_running");
 const key = (k) => ev(`dispatchEvent(new KeyboardEvent('keydown',{key:'${k}'}))`);
+await key("f");  // show the fps counter in the screenshots
 await key("5"); await sleep(7000); await shot("03_shades");
 await key("4"); await sleep(3000); await shot("04_mesh");
 await key("1"); await sleep(3000); await shot("05_neon");

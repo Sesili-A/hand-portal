@@ -73,7 +73,7 @@
       <label class="file">Use a video file<input id="file" type="file" accept="video/*"></label>
     </div>
     <p id="status"></p>
-    <p class="keys">Keys: N / B filter · C clear drawing · P snap photo · R reset stickers · H hand lines · S screenshot</p>
+    <p class="keys">Keys: N / B filter · C clear drawing · E eraser · +/− pen size · P snap photo · R reset stickers · H hand lines · F fps · S screenshot</p>
   </div>
 </section>
 
@@ -91,15 +91,17 @@ const PINCH_ON = 0.33, PINCH_OFF = 0.5;   // thumb-index distance / palm size (h
 const THUMB_OUT = 0.65;                   // thumb tip to index knuckle / palm size: above = thumb sticking out
 const PINCH_HOLD = 0.35;                  // seconds a pinch on empty space must be held to change filter
 const FIST_FRAMES = 6;
-const BAR_H = 70;                         // top button bar: no drawing or grabbing up here
+let BAR_H = 80;                           // top button bar: no drawing or grabbing up here (set by layoutButtons)
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), scene = $("scene"), ui = $("ui"), view = $("view");
 const sctx = scene.getContext("2d"), uctx = ui.getContext("2d");
 const mk = () => document.createElement("canvas");
-const frame = mk(), fctx = frame.getContext("2d", { willReadFrequently: true });
-const fx = mk(), xctx = fx.getContext("2d", { willReadFrequently: true });
+// only tmp is read back with getImageData; the rest stay GPU-backed so compositing is cheap
+const frame = mk(), fctx = frame.getContext("2d");
+const fx = mk(), xctx = fx.getContext("2d");
 const ink = mk(), ictx = ink.getContext("2d");
+const glow = mk(), gctx = glow.getContext("2d");  // quarter-size blurred copy of the ink
 const tmp = mk(), tctx = tmp.getContext("2d", { willReadFrequently: true });
 
 let W = 1280, H = 720, mirror = true, running = false;
@@ -145,13 +147,29 @@ function ensureFace() {
   if (faceLoading) return;
   toast("Loading face model…", 2);
   faceLoading = makeLandmarker(FaceLandmarker, {
-    baseOptions: { modelAssetPath: FACE_MODEL }, runningMode: "VIDEO", numFaces: 2,
+    baseOptions: { modelAssetPath: FACE_MODEL }, runningMode: "VIDEO", numFaces: 1,
   }).then((f) => { faceLm = f; }).catch((e) => { console.error(e); toast("Face model failed to load", 3); });
 }
 
 // ---------------------------------------------------------------- hands
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 const TIPS = [8, 12, 16, 20], PIPS = [6, 10, 14, 18];
+
+// One Euro filter: strong smoothing when the point is still, little lag when it moves fast
+class Euro {
+  constructor(minCutoff, beta, dCutoff = 1) { Object.assign(this, { minCutoff, beta, dCutoff, x: null }); }
+  static a(cutoff, dt) { const r = 2 * Math.PI * cutoff * dt; return r / (r + 1); }
+  filter(p, t) {
+    if (!this.x) { this.x = p.slice(); this.d = [0, 0]; this.t = t; return this.x.slice(); }
+    const dt = Math.min(Math.max(t - this.t, 1 / 240), 0.25);
+    this.t = t;
+    const ad = Euro.a(this.dCutoff, dt);
+    this.d = this.d.map((d, i) => d + ad * ((p[i] - this.x[i]) / dt - d));
+    const a = Euro.a(this.minCutoff + this.beta * Math.hypot(this.d[0], this.d[1]), dt);
+    this.x = this.x.map((x, i) => x + a * (p[i] - x));
+    return this.x.slice();
+  }
+}
 
 function buildHands(res) {
   const out = [], seen = new Set();
@@ -160,7 +178,7 @@ function buildHands(res) {
     let label = handed[i]?.[0]?.categoryName ?? String(i);
     if (seen.has(label)) label += i;  // the model sometimes labels both hands the same
     seen.add(label);
-    const pts = lms.map((p) => [p.x * W, p.y * H]);
+    const pts = lms.map((p) => [(mirror ? 1 - p.x : p.x) * W, p.y * H]);  // detection runs on the raw video
     const size = Math.max(dist(pts[0], pts[9]), 1);
     const up = TIPS.map((t, k) => dist(pts[t], pts[0]) > dist(pts[PIPS[k]], pts[0]) * 1.1);
     out.push({
@@ -169,6 +187,7 @@ function buildHands(res) {
       pinchRatio: dist(pts[4], pts[8]) / size,
       isFist: !up.some(Boolean),
       isPointing: up[0] && !up[1] && !up[2],
+      thumbRatio: dist(pts[4], pts[5]) / size,
       thumbOut: dist(pts[4], pts[5]) / size > THUMB_OUT,
       pinchPoint: [(pts[4][0] + pts[8][0]) / 2, (pts[4][1] + pts[8][1]) / 2],
     });
@@ -387,6 +406,7 @@ let filterIdx = 0;
 function setFilter(i) {
   filterIdx = ((i % FILTERS.length) + FILTERS.length) % FILTERS.length;
   toast(`Filter: ${FILTERS[filterIdx].name}`);
+  portal.flash = performance.now() / 1000 + 0.3;
   if (FILTERS[filterIdx].face) ensureFace();
 }
 
@@ -408,7 +428,7 @@ class Item {
   }
   outline(ctx) {
     ctx.save(); this.apply(ctx);
-    ctx.strokeStyle = "rgb(120,255,0)"; ctx.lineWidth = 2 / this.scale;
+    ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 2 / this.scale; ctx.setLineDash([8 / this.scale, 6 / this.scale]);
     ctx.strokeRect(-this.img.width / 2, -this.img.height / 2, this.img.width, this.img.height);
     ctx.restore();
   }
@@ -491,15 +511,51 @@ function snap() {
 }
 
 // ---------------------------------------------------------------- drawing
-const COLORS = [["Pink", [255, 0, 255]], ["Cyan", [0, 255, 255]], ["Lime", [120, 255, 0]],
-  ["Gold", [255, 215, 0]], ["Red", [255, 60, 60]], ["White", [255, 255, 255]]];
-let inkColor = COLORS[0][1], eraser = false, thickness = 8;
-const prevTip = new Map(), tipSmooth = new Map();
-function clearInk() { ictx.clearRect(0, 0, W, H); toast("Drawing cleared"); }
+const COLORS = [["Pink", [255, 79, 216]], ["Cyan", [63, 240, 255]], ["Lime", [140, 255, 60]],
+  ["Gold", [255, 205, 60]], ["Red", [255, 80, 80]], ["White", [255, 255, 255]]];
+let inkColor = COLORS[0][1], eraser = false, thickness = 7, inkDirty = false;
+const strokes = new Map();  // hand label -> { euro, pts, on, off, active }
+const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+const TAU = Math.PI * 2;
+function clearInk() { ictx.clearRect(0, 0, W, H); inkDirty = true; toast("Drawing cleared"); }
+function inkStyle() {
+  ictx.lineCap = "round"; ictx.lineJoin = "round";
+  if (eraser) { ictx.globalCompositeOperation = "destination-out"; ictx.lineWidth = thickness * 5; ictx.strokeStyle = ictx.fillStyle = "#000"; }
+  else { ictx.globalCompositeOperation = "source-over"; ictx.lineWidth = thickness; ictx.strokeStyle = ictx.fillStyle = rgb(inkColor); }
+}
+// smooth pen: quadratic curves through the midpoints of the filtered fingertip path
+function penTo(s, p) {
+  const pts = s.pts, last = pts[pts.length - 1];
+  if (last && dist(last, p) < 1.2) return;
+  pts.push(p);
+  if (pts.length > 3) pts.shift();
+  const n = pts.length;
+  ictx.save(); inkStyle(); ictx.beginPath();
+  if (n === 1) { ictx.arc(p[0], p[1], ictx.lineWidth / 2, 0, TAU); ictx.fill(); }
+  else {
+    ictx.moveTo(...(n > 2 ? mid(pts[0], pts[1]) : pts[0]));
+    ictx.quadraticCurveTo(...pts[n - 2], ...mid(pts[n - 2], pts[n - 1]));
+    ictx.stroke();
+  }
+  ictx.restore();
+  inkDirty = true;
+}
+function penUp(s) {
+  const n = s.pts.length;
+  if (n >= 2) {
+    ictx.save(); inkStyle(); ictx.beginPath();
+    ictx.moveTo(...mid(s.pts[n - 2], s.pts[n - 1])); ictx.lineTo(...s.pts[n - 1]); ictx.stroke();
+    ictx.restore();
+    inkDirty = true;
+  }
+  s.pts = []; s.active = false;
+}
 
 // ---------------------------------------------------------------- hover buttons
 class DwellButton {
-  constructor(label, color, action, dwell = 0.6) { Object.assign(this, { label, color, action, dwell, since: null, fired: false, rect: [0, 0, 0, 0] }); }
+  constructor(label, color, action, dwell = 0.6, kind = "pill") {
+    Object.assign(this, { label, color, action, dwell, kind, since: null, fired: false, rect: [0, 0, 0, 0] });
+  }
   contains([px, py]) { const [x, y, w, h] = this.rect; return px >= x && px <= x + w && py >= y && py <= y + h; }
   update(pointers, now) {
     if (pointers.some((p) => this.contains(p))) {
@@ -508,50 +564,80 @@ class DwellButton {
     } else { this.since = null; this.fired = false; }
     return false;
   }
-  draw(ctx, now, active) {
+  draw(g, now, active) {
     const [x, y, w, h] = this.rect;
-    ctx.fillStyle = rgb(this.color, 0.78); ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = active ? "#fff" : "rgba(255,255,255,0.4)"; ctx.lineWidth = active ? 3 : 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    const light = this.color[0] + this.color[1] + this.color[2] > 450;
-    ctx.fillStyle = light ? "#000" : "#fff";
-    ctx.font = `600 ${Math.max(10, Math.min(15, w / 6))}px Inter, system-ui, sans-serif`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(this.label, x + w / 2, y + h / 2);
-    if (this.since !== null && !this.fired) {
-      ctx.fillStyle = "rgb(0,255,120)";
-      ctx.fillRect(x, y + h - 6, (w * Math.min((now - this.since) / this.dwell, 1)) | 0, 6);
+    const p = this.since !== null && !this.fired ? Math.min((now - this.since) / this.dwell, 1) : 0;
+    g.save();
+    if (this.kind === "swatch") {
+      const cx = x + w / 2, cy = y + h / 2, r = Math.min(w, h) / 2 - 6;
+      if (active) { g.beginPath(); g.arc(cx, cy, r + 4, 0, TAU); g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); }
+      g.beginPath(); g.arc(cx, cy, r, 0, TAU); g.fillStyle = rgb(this.color); g.fill();
+      if (p) { g.beginPath(); g.arc(cx, cy, r + 4, -Math.PI / 2, -Math.PI / 2 + TAU * p); g.strokeStyle = "#3ff0ff"; g.lineWidth = 3; g.stroke(); }
+    } else {
+      const py = y + h * 0.14, ph = h * 0.72;
+      g.beginPath(); g.roundRect(x, py, w, ph, ph / 2);
+      g.fillStyle = active ? "rgba(255,79,216,0.92)" : "rgba(255,255,255,0.08)"; g.fill();
+      if (p) { g.clip(); g.fillStyle = "rgba(63,240,255,0.38)"; g.fillRect(x, py, w * p, ph); }
+      g.fillStyle = active ? "#1a0716" : "#ece9f7";
+      g.font = `600 ${Math.round(ph * 0.4)}px Inter, system-ui, sans-serif`;
+      g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(this.label, x + w / 2, py + ph / 2 + 1);
     }
+    g.restore();
   }
 }
 const buttons = [
-  ...COLORS.map(([name, col]) => new DwellButton(name, col, () => { inkColor = col; eraser = false; toast(`Colour: ${name}`); }, 0.5)),
-  new DwellButton("Eraser", [40, 40, 40], () => { eraser = true; toast("Eraser"); }, 0.5),
-  new DwellButton("Clear", [120, 30, 30], clearInk, 0.8),
-  new DwellButton("Snap", [20, 50, 90], snap, 0.8),
-  new DwellButton("Reset", [70, 30, 90], () => { resetStickers(); toast("Stickers reset"); }, 0.8),
+  ...COLORS.map(([name, col]) => new DwellButton(name, col, () => { inkColor = col; eraser = false; toast(`Colour: ${name}`); }, 0.45, "swatch")),
+  new DwellButton("Eraser", null, () => { eraser = true; toast("Eraser"); }, 0.5),
+  new DwellButton("Clear", null, clearInk, 0.8),
+  new DwellButton("Snap", null, snap, 0.8),
+  new DwellButton("Reset", null, () => { resetStickers(); toast("Stickers reset"); }, 0.8),
 ];
+let BAR = [0, 0, 0, 0];
 function layoutButtons() {
-  const gap = 6, bw = Math.min(104, (W - 20 - gap * (buttons.length - 1)) / buttons.length);
-  buttons.forEach((b, i) => { b.rect = [10 + i * (bw + gap), 10, bw, 50]; });
+  const S = 44, P = 76, gap = 8, pad = 10, div = 18;
+  const total = pad * 2 + COLORS.length * S + (COLORS.length - 1) * gap + div + 4 * P + 3 * gap;
+  const k = Math.min(1, (W - 24) / total), x0 = (W - total * k) / 2, y0 = 12;
+  let x = x0 + pad * k;
+  buttons.forEach((b, i) => {
+    if (i === COLORS.length) x += (div - gap) * k;
+    const w = (i < COLORS.length ? S : P) * k;
+    b.rect = [x, y0 + pad * k, w, S * k];
+    x += w + gap * k;
+  });
+  BAR = [x0, y0, total * k, (S + pad * 2) * k];
+  BAR_H = y0 + BAR[3] + 6;
 }
 
 // ---------------------------------------------------------------- per-frame logic
 const pinchState = new Map();  // label -> {was, holdStart, fired}
-let fistCount = 0, cooldown = 0, polySm = null, showHands = true, fps = 0, prevNow = 0;
-let lastHands = [], drawingSet = new Set(), framingSet = new Set();
+let fistCount = 0, cooldown = 0, showHands = false, showFps = false, fps = 30, prevNow = 0, trackMs = 0, frameMs = 0;
+let drawingSet = new Set(), framingSet = new Set();
+const PORTAL_GRACE = 6;  // frames the portal survives a tracking dropout
+const portal = { euro: [0, 1, 2, 3].map(() => new Euro(1.0, 0.01)), poly: null, open: 0, miss: 99, flash: 0 };
+const polyArea = (P) => Math.abs(P.reduce((s, p, i) => { const q = P[(i + 1) % P.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
 
 function step(now) {
+  const dt = prevNow ? Math.min(Math.max(now - prevNow, 1e-3), 0.1) : 1 / 30;
   fctx.save();
   if (mirror) { fctx.translate(W, 0); fctx.scale(-1, 1); }
   fctx.drawImage(video, 0, 0, W, H);
   fctx.restore();
 
   ts = Math.max(Math.round(performance.now()), ts + 1);
-  const hands = buildHands(handLm.detectForVideo(frame, ts));
-  lastHands = hands;
+  const t0 = performance.now();
+  const hands = buildHands(handLm.detectForVideo(video, ts));
+  trackMs = 0.9 * trackMs + 0.1 * (performance.now() - t0);
   const labels = new Set(hands.map((h) => h.label));
-  for (const l of [...pinchState.keys()]) if (!labels.has(l)) { pinchState.delete(l); grabs.delete(l); prevTip.delete(l); tipSmooth.delete(l); }
+  for (const l of [...pinchState.keys()]) if (!labels.has(l)) { pinchState.delete(l); grabs.delete(l); }
+  for (const l of [...strokes.keys()]) if (!labels.has(l)) { penUp(strokes.get(l)); strokes.delete(l); }
+
+  // smoothed fingertip per hand (used for the pen and the cursors)
+  for (const h of hands) {
+    let s = strokes.get(h.label);
+    if (s && s.euro.x && dist(s.euro.x, h.index) > W * 0.25) { penUp(s); s = null; }  // tracking jumped
+    if (!s) strokes.set(h.label, (s = { euro: new Euro(1.4, 0.015), pts: [], on: 0, off: 0, active: false }));
+    h.tip = s.euro.filter(h.index, now);
+  }
 
   // pinch state with hysteresis
   for (const h of hands) {
@@ -563,7 +649,7 @@ function step(now) {
   }
 
   // hover buttons: any raised index fingertip that is not pinching
-  const pointers = hands.filter((h) => h.up[0] && !h.pinched).map((h) => h.index);
+  const pointers = hands.filter((h) => h.up[0] && !h.pinched).map((h) => h.tip);
   for (const b of buttons) if (b.update(pointers, now)) b.action();
 
   // grab stickers where a pinch starts
@@ -602,15 +688,15 @@ function step(now) {
     const sig = ls.join("|");
     if (ls.length >= 2) {
       const p1 = pp[ls[0]], p2 = pp[ls[1]];
-      const mid = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2], d = Math.max(dist(p1, p2), 1);
+      const m = mid(p1, p2), d = Math.max(dist(p1, p2), 1);
       const ang = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
-      if (it.grabSig !== sig) { it.grabSig = sig; it.ref = { d, s: it.scale, a: ang, ia: it.angle, ox: it.cx - mid[0], oy: it.cy - mid[1] }; }
+      if (it.grabSig !== sig) { it.grabSig = sig; it.ref = { d, s: it.scale, a: ang, ia: it.angle, ox: it.cx - m[0], oy: it.cy - m[1] }; }
       const r = it.ref, da = ang - r.a;
       it.scale = Math.min(5, Math.max(0.15, (r.s * d) / r.d));
       it.angle = r.ia + da;
       const k = it.scale / r.s, c = Math.cos(da), s = Math.sin(da);
-      it.cx = mid[0] + (r.ox * c - r.oy * s) * k;
-      it.cy = mid[1] + (r.ox * s + r.oy * c) * k;
+      it.cx = m[0] + (r.ox * c - r.oy * s) * k;
+      it.cy = m[1] + (r.ox * s + r.oy * c) * k;
     } else {
       const p = pp[ls[0]];
       if (it.grabSig !== sig) { it.grabSig = sig; it.ref = { ox: it.cx - p[0], oy: it.cy - p[1] }; }
@@ -618,59 +704,66 @@ function step(now) {
     }
   }
 
-  // portal: both hands in an L (index up, thumb out)
-  const framing = hands.filter((h) => h.up[0] && h.thumbOut && !h.pinched && !h.isFist && !grabs.has(h.label));
-  framingSet = new Set();
-  let poly = null;
+  // portal: both hands in an L. Once open, the thumb test relaxes so it does not flicker.
+  const wasOpen = portal.miss < PORTAL_GRACE;
+  const thumbMin = wasOpen ? THUMB_OUT * 0.7 : THUMB_OUT;
+  const framing = hands.filter((h) => h.up[0] && h.thumbRatio > thumbMin && !h.pinched && !h.isFist && !grabs.has(h.label));
+  let found = false;
   if (framing.length >= 2) {
     const [a, b] = framing.slice(0, 2).sort((p, q) => p.pts[0][0] - q.pts[0][0]);
-    framingSet = new Set([a.label, b.label]);
-    const raw = [a.index, b.index, b.thumb, a.thumb].flat();
-    polySm = polySm ? polySm.map((v, i) => 0.55 * raw[i] + 0.45 * v) : raw;
+    if (!wasOpen) portal.euro.forEach((e) => (e.x = null));
+    const c = [a.index, a.thumb, b.index, b.thumb].map((p, i) => portal.euro[i].filter(p, now));
+    const cx = (c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, cy = (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4;
     // join corners by angle around the centre so tilted hands never make a crossed "bow-tie"
-    const pts4 = [0, 2, 4, 6].map((i) => [polySm[i], polySm[i + 1]]);
-    const cx = pts4.reduce((s, p) => s + p[0], 0) / 4, cy = pts4.reduce((s, p) => s + p[1], 0) / 4;
-    poly = pts4.sort((p, q) => Math.atan2(p[1] - cy, p[0] - cx) - Math.atan2(q[1] - cy, q[0] - cx));
-  } else polySm = null;
+    c.sort((p, q) => Math.atan2(p[1] - cy, p[0] - cx) - Math.atan2(q[1] - cy, q[0] - cx));
+    if (polyArea(c) > W * H * 0.004) { portal.poly = c; found = true; framingSet = new Set([a.label, b.label]); }
+  }
+  portal.miss = found ? 0 : portal.miss + 1;
+  if (portal.miss >= PORTAL_GRACE) framingSet = new Set();  // keep the framing hands marked through short dropouts
+  const target = portal.miss < PORTAL_GRACE ? 1 : 0;
+  portal.open = Math.min(1, Math.max(0, portal.open + (target ? dt / 0.22 : -dt / 0.16)));
 
-  // drawing: point with the index finger, thumb tucked in
+  // drawing: point with the index finger, thumb tucked. Short dropouts do not break the stroke.
   drawingSet = new Set();
   for (const h of hands) {
-    const prev = tipSmooth.get(h.label);
-    const tip = prev ? [0.5 * h.index[0] + 0.5 * prev[0], 0.5 * h.index[1] + 0.5 * prev[1]] : h.index;
-    tipSmooth.set(h.label, tip);
-    const drawing = h.isPointing && !h.thumbOut && !h.pinched && !framingSet.has(h.label) && tip[1] > BAR_H;
-    if (!drawing) { prevTip.delete(h.label); continue; }
-    drawingSet.add(h.label);
-    const last = prevTip.get(h.label);
-    if (last) {
-      ictx.save();
-      ictx.lineCap = "round"; ictx.lineJoin = "round";
-      if (eraser) { ictx.globalCompositeOperation = "destination-out"; ictx.lineWidth = thickness * 5; ictx.strokeStyle = "#000"; }
-      else { ictx.lineWidth = thickness; ictx.strokeStyle = rgb(inkColor); }
-      ictx.beginPath(); ictx.moveTo(...last); ictx.lineTo(...tip); ictx.stroke();
-      ictx.restore();
-    }
-    prevTip.set(h.label, tip);
+    const s = strokes.get(h.label);
+    const want = h.isPointing && !h.thumbOut && !h.pinched && !framingSet.has(h.label) && !grabs.has(h.label) && h.tip[1] > BAR_H;
+    if (want) { s.on++; s.off = 0; } else { s.off++; s.on = 0; }
+    if (!s.active && s.on >= 2) { s.active = true; s.pts = []; }
+    if (s.active && s.off >= 4) penUp(s);
+    if (s.active && want) penTo(s, h.tip);
+    if (s.active) drawingSet.add(h.label);
   }
 
-  // ---- compose the scene: camera -> portal -> ink -> stickers
+  // ---- compose the scene: camera -> portal -> ink (+ cheap glow) -> stickers
   sctx.drawImage(frame, 0, 0);
-  if (poly) renderPortal(poly, now);
+  renderPortal(now);
+  if (inkDirty) {
+    gctx.clearRect(0, 0, glow.width, glow.height);
+    gctx.filter = "blur(2px)";
+    gctx.drawImage(ink, 0, 0, glow.width, glow.height);
+    gctx.filter = "none";
+    inkDirty = false;
+  }
   sctx.drawImage(ink, 0, 0);
   sctx.save();
   sctx.globalCompositeOperation = "lighter";
-  sctx.filter = "blur(7px)";
-  sctx.drawImage(ink, 0, 0);
+  sctx.drawImage(glow, 0, 0, W, H);
   sctx.restore();
   for (const it of items) it.draw(sctx);
 
-  fps = 0.9 * fps + 0.1 / Math.max(now - prevNow, 1e-3);
+  fps = 0.9 * fps + 0.1 / dt;
   prevNow = now;
   drawUI(hands, now);
+  frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
 }
 
-function renderPortal(poly, now) {
+function renderPortal(now) {
+  if (portal.open <= 0 || !portal.poly) return;
+  const e = 1 - Math.pow(1 - portal.open, 3);  // ease-out
+  const P = portal.poly;
+  const cx = P.reduce((s, p) => s + p[0], 0) / 4, cy = P.reduce((s, p) => s + p[1], 0) / 4, k = 0.6 + 0.4 * e;
+  const poly = P.map(([x, y]) => [cx + (x - cx) * k, cy + (y - cy) * k]);
   const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
   const x = Math.max(0, Math.floor(Math.min(...xs))), y = Math.max(0, Math.floor(Math.min(...ys)));
   const w = Math.min(W, Math.ceil(Math.max(...xs))) - x, h = Math.min(H, Math.ceil(Math.max(...ys))) - y;
@@ -678,72 +771,113 @@ function renderPortal(poly, now) {
   const f = FILTERS[filterIdx];
   let faces = [];
   if (f.face) {
-    if (faceLm) faces = faceLm.detectForVideo(frame, ts).faceLandmarks.map((pts) => pts.map((p) => [p.x * W, p.y * H]));
+    if (faceLm) faces = faceLm.detectForVideo(video, ts).faceLandmarks.map((pts) => pts.map((p) => [(mirror ? 1 - p.x : p.x) * W, p.y * H]));
     else ensureFace();
   }
   f.fn(x, y, w, h, now, faces);
 
   const path = () => { sctx.beginPath(); poly.forEach((p, i) => (i ? sctx.lineTo(...p) : sctx.moveTo(...p))); sctx.closePath(); };
-  sctx.save(); path(); sctx.clip(); sctx.drawImage(fx, x, y, w, h, x, y, w, h); sctx.restore();
   sctx.save();
-  path(); sctx.strokeStyle = sctx.shadowColor = rgb(f.edge); sctx.shadowBlur = 22; sctx.lineWidth = 5; sctx.stroke();
-  sctx.shadowBlur = 0; sctx.strokeStyle = "#fff"; sctx.lineWidth = 2; sctx.stroke();
+  sctx.globalAlpha = e;
+  path(); sctx.clip();
+  sctx.drawImage(fx, x, y, w, h, x, y, w, h);
+  if (portal.flash > now) { sctx.fillStyle = `rgba(255,255,255,${(0.55 * (portal.flash - now)) / 0.3})`; sctx.fillRect(x, y, w, h); }
   sctx.restore();
+
+  // edge: layered glow (cheaper and softer than shadowBlur), crisp core, a light running around it
+  const col = f.edge;
+  sctx.save();
+  sctx.globalAlpha = e; sctx.lineJoin = "round"; sctx.lineCap = "round";
+  for (const [lw, a] of [[20, 0.07], [11, 0.15], [5, 0.5]]) { path(); sctx.lineWidth = lw; sctx.strokeStyle = rgb(col, a); sctx.stroke(); }
+  path(); sctx.lineWidth = 1.8; sctx.strokeStyle = "rgba(255,255,255,0.95)"; sctx.stroke();
+  path(); sctx.setLineDash([34, 260]); sctx.lineDashOffset = -now * 320; sctx.lineWidth = 3.5; sctx.strokeStyle = "#fff"; sctx.stroke();
+  sctx.setLineDash([]);
+  for (const p of poly) {
+    sctx.beginPath(); sctx.arc(p[0], p[1], 9, 0, TAU); sctx.fillStyle = rgb(col, 0.3); sctx.fill();
+    sctx.beginPath(); sctx.arc(p[0], p[1], 4, 0, TAU); sctx.fillStyle = "#fff"; sctx.fill();
+  }
+  sctx.restore();
+}
+
+function pill(g, x, y, w, h, fill = "rgba(10,8,20,0.66)") {
+  g.beginPath(); g.roundRect(x, y, w, h, h / 2); g.fillStyle = fill; g.fill();
+  g.strokeStyle = "rgba(255,255,255,0.10)"; g.lineWidth = 1; g.stroke();
 }
 
 function drawUI(hands, now) {
   const g = uctx;
   g.clearRect(0, 0, W, H);
+
+  // toolbar
+  g.save();
+  pill(g, ...BAR);
+  const b0 = buttons[COLORS.length - 1].rect, b1 = buttons[COLORS.length].rect;
+  g.fillStyle = "rgba(255,255,255,0.16)";
+  g.fillRect(Math.round((b0[0] + b0[2] + b1[0]) / 2), b1[1] + b1[3] * 0.25, 1, b1[3] * 0.5);
+  g.restore();
   buttons.forEach((b, i) => b.draw(g, now, i < COLORS.length ? !eraser && inkColor === COLORS[i][1] : i === COLORS.length && eraser));
 
+  // current filter chip
+  const f = FILTERS[filterIdx], sub = `${filterIdx + 1}/${FILTERS.length}`;
   g.save();
-  g.font = "700 22px 'Space Grotesk', system-ui, sans-serif"; g.textAlign = "left"; g.textBaseline = "alphabetic";
-  g.lineWidth = 4; g.strokeStyle = "rgba(0,0,0,0.6)";
-  const label = `Filter ${filterIdx + 1}/${FILTERS.length}: ${FILTERS[filterIdx].name}`;
-  g.strokeText(label, 14, BAR_H + 28); g.fillStyle = "#fff"; g.fillText(label, 14, BAR_H + 28);
+  g.font = "600 15px 'Space Grotesk', system-ui, sans-serif"; const lw = g.measureText(f.name).width;
+  g.font = "500 12px Inter, system-ui, sans-serif"; const sw = g.measureText(sub).width;
+  const cx0 = 16, cy0 = BAR_H + 6, ch = 32;
+  pill(g, cx0, cy0, 14 + 10 + 9 + lw + 9 + sw + 14, ch);
+  g.beginPath(); g.arc(cx0 + 19, cy0 + ch / 2, 5, 0, TAU); g.fillStyle = rgb(f.edge); g.fill();
+  g.textBaseline = "middle"; g.textAlign = "left";
+  g.font = "600 15px 'Space Grotesk', system-ui, sans-serif"; g.fillStyle = "#fff"; g.fillText(f.name, cx0 + 33, cy0 + ch / 2 + 1);
+  g.font = "500 12px Inter, system-ui, sans-serif"; g.fillStyle = "#9a94b5"; g.fillText(sub, cx0 + 33 + lw + 9, cy0 + ch / 2 + 1);
+  if (showFps) { g.textAlign = "right"; g.fillStyle = "rgb(140,255,160)"; g.fillText(`${fps.toFixed(0)} fps · tracking ${trackMs.toFixed(0)} ms · frame ${frameMs.toFixed(0)} ms`, W - 16, cy0 + ch / 2); }
   g.restore();
 
+  // grabbed stickers
   for (const it of items) if (it.grabSig !== null) it.outline(g);
 
+  // hands: optional skeleton, then fingertip cursors
   for (const h of hands) {
     if (showHands) {
-      g.strokeStyle = "rgba(230,230,230,0.8)"; g.lineWidth = 1; g.beginPath();
+      g.strokeStyle = "rgba(255,255,255,0.35)"; g.lineWidth = 1; g.beginPath();
       for (const c of HandLandmarker.HAND_CONNECTIONS) { g.moveTo(...h.pts[c.start]); g.lineTo(...h.pts[c.end]); }
       g.stroke();
     }
     if (h.pinched) {
-      g.fillStyle = "rgb(120,255,0)";
-      g.beginPath(); g.arc(...h.pinchPoint, 10, 0, Math.PI * 2); g.fill();
+      g.beginPath(); g.arc(...h.pinchPoint, 7, 0, TAU); g.fillStyle = "#3ff0ff"; g.fill();
       const st = pinchState.get(h.label);
       if (st?.holdStart != null) {
-        g.strokeStyle = "rgb(120,255,0)"; g.lineWidth = 3; g.beginPath();
-        g.arc(...h.pinchPoint, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min((now - st.holdStart) / PINCH_HOLD, 1));
+        g.strokeStyle = "#3ff0ff"; g.lineWidth = 3; g.beginPath();
+        g.arc(...h.pinchPoint, 18, -Math.PI / 2, -Math.PI / 2 + TAU * Math.min((now - st.holdStart) / PINCH_HOLD, 1));
         g.stroke();
       }
-    } else if (h.up[0]) {
-      const r = eraser ? (thickness * 5) / 2 : thickness;
-      g.beginPath(); g.arc(...h.index, Math.max(r, 6), 0, Math.PI * 2);
-      if (drawingSet.has(h.label)) {
-        if (eraser) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); } else { g.fillStyle = rgb(inkColor); g.fill(); }
-      } else { g.strokeStyle = framingSet.has(h.label) ? "rgba(255,255,255,0.9)" : rgb(inkColor, 0.8); g.lineWidth = 2; g.stroke(); }
+    } else if (h.up[0] && !framingSet.has(h.label)) {
+      const t = h.tip, r = eraser ? thickness * 2.5 : Math.max(thickness * 0.8, 5);
+      g.beginPath(); g.arc(t[0], t[1], drawingSet.has(h.label) ? r : Math.max(r + 4, 10), 0, TAU);
+      if (drawingSet.has(h.label) && !eraser) { g.fillStyle = rgb(inkColor); g.fill(); g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.stroke(); }
+      else { g.strokeStyle = "rgba(255,255,255,0.85)"; g.lineWidth = 2; g.stroke(); }
     }
   }
 
-  // hint bar
-  g.fillStyle = "rgba(0,0,0,0.72)"; g.fillRect(0, H - 30, W, 30);
-  g.font = "500 13px Inter, system-ui, sans-serif"; g.textBaseline = "middle"; g.textAlign = "left"; g.fillStyle = "#ddd";
+  // hint
+  g.save();
+  g.font = "500 12.5px Inter, system-ui, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
   const hint = W > 900
-    ? "Both hands in an L = portal  ·  point (thumb tucked) = draw  ·  pinch a sticker = move  ·  hold a pinch or fist = next filter"
-    : "L-hands = portal · point = draw · pinch = move · fist = filter";
-  g.fillText(hint, 10, H - 15);
-  g.font = "600 13px Inter, system-ui, sans-serif"; g.textAlign = "right"; g.fillStyle = "rgb(120,255,120)";
-  g.fillText(`${fps.toFixed(0)} fps`, W - 12, BAR_H + 22);
+    ? "Both hands in an L: portal   ·   Point, thumb tucked: draw   ·   Pinch a sticker: move   ·   Fist or hold a pinch: next filter"
+    : "L-hands: portal · Point: draw · Pinch: move · Fist: filter";
+  const hw = g.measureText(hint).width + 32;
+  pill(g, (W - hw) / 2, H - 42, hw, 28);
+  g.fillStyle = "#cfcae6"; g.fillText(hint, W / 2, H - 28 + 0.5);
+  g.restore();
 
-  if (performance.now() / 1000 < toastUntil) {
-    g.font = "700 26px 'Space Grotesk', system-ui, sans-serif"; g.textAlign = "center";
-    const tw = g.measureText(toastMsg).width, ty = H * 0.62;
-    g.fillStyle = "rgba(0,0,0,0.75)"; g.fillRect(W / 2 - tw / 2 - 18, ty - 24, tw + 36, 48);
-    g.fillStyle = "#fff"; g.fillText(toastMsg, W / 2, ty);
+  // toast
+  const left = toastUntil - performance.now() / 1000;
+  if (left > 0) {
+    g.save();
+    g.globalAlpha = Math.min(1, left / 0.25);
+    g.font = "600 18px 'Space Grotesk', system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    const tw = g.measureText(toastMsg).width + 44;
+    pill(g, (W - tw) / 2, H - 98, tw, 40, "rgba(10,8,20,0.82)");
+    g.fillStyle = "#fff"; g.fillText(toastMsg, W / 2, H - 78 + 1);
+    g.restore();
   }
 }
 
@@ -761,6 +895,7 @@ function sizeTo(vw, vh) {
   const s = Math.min(1, 1280 / Math.max(vw, vh));
   W = Math.round(vw * s); H = Math.round(vh * s);
   for (const c of [scene, ui, frame, fx, ink]) { c.width = W; c.height = H; }
+  glow.width = Math.ceil(W / 4); glow.height = Math.ceil(H / 4);
   layoutButtons(); resetStickers(); fit();
 }
 
@@ -826,6 +961,7 @@ addEventListener("keydown", (e) => {
   else if (k === "p") snap();
   else if (k === "r") { resetStickers(); toast("Stickers reset"); }
   else if (k === "h") showHands = !showHands;
+  else if (k === "f") showFps = !showFps;
   else if (k === "s") {
     const a = document.createElement("a");
     a.href = scene.toDataURL("image/png");
