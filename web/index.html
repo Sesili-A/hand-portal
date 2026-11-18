@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hand Portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+  /* One screen: the camera canvas fills the window; a start card sits over it until the camera runs. */
+  :root {
+    --bg: #07060d;
+    --panel: #12101d;
+    --line: #2a2540;
+    --fg: #ece9f7;
+    --muted: #9a94b5;
+    --accent: #ff4fd8;
+    --accent-2: #3ff0ff;
+    --display: "Space Grotesk", system-ui, sans-serif;
+    --body: "Inter", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: var(--body); overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  #view { position: relative; }
+  #view canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #intro {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    padding: 16px; background: radial-gradient(ellipse at 50% 30%, #1d1033 0%, var(--bg) 70%);
+  }
+  .card {
+    width: min(520px, 100%); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 28px; display: grid; gap: 20px;
+  }
+  h1 { font-family: var(--display); font-size: 2.2rem; margin: 0; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .lede { margin: 0; color: var(--muted); line-height: 1.5; }
+  .moves { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .moves li { display: grid; grid-template-columns: 9.5rem 1fr; gap: 12px; align-items: baseline; font-size: 0.93rem; line-height: 1.4; }
+  .moves b { font-family: var(--display); font-weight: 500; color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.78rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button, .file {
+    font: 600 0.95rem var(--body); border-radius: 10px; padding: 12px 18px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--fg);
+  }
+  #start { background: var(--accent); border-color: var(--accent); color: #1a0716; }
+  #start:disabled { opacity: 0.45; cursor: wait; }
+  button:focus-visible, .file:focus-within { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  .file input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  #status { margin: 0; font-size: 0.85rem; color: var(--muted); min-height: 1.2em; }
+  #status.err { color: #ff8a8a; }
+  .keys { margin: 0; font-size: 0.8rem; color: var(--muted); }
+  @media (max-width: 480px) { .moves li { grid-template-columns: 1fr; gap: 2px; } }
+</style>
+</head>
+<body>
+<main id="stage"><div id="view"><canvas id="scene"></canvas><canvas id="ui"></canvas></div></main>
+
+<section id="intro">
+  <div class="card">
+    <h1>Hand <span>Portal</span></h1>
+    <p class="lede">Filters, drawing and stickers, all controlled with your hands at the same time. Nothing leaves your computer: the camera is processed in this browser tab.</p>
+    <ul class="moves">
+      <li><b>Open a portal</b><span>Make an L with thumb and index on both hands. The filter shows inside the frame, including face filters.</span></li>
+      <li><b>Change filter</b><span>Hold a pinch on empty space, or make a fist.</span></li>
+      <li><b>Draw</b><span>Point with your index finger, thumb tucked in. Hover the colour buttons at the top to change colour.</span></li>
+      <li><b>Move stickers</b><span>Pinch a sticker to drag it. Pinch it with both hands to resize and rotate.</span></li>
+    </ul>
+    <div class="actions">
+      <button id="start" disabled>Loading hand model…</button>
+      <label class="file">Use a video file<input id="file" type="file" accept="video/*"></label>
+    </div>
+    <p id="status"></p>
+    <p class="keys">Keys: N / B filter · C clear drawing · P snap photo · R reset stickers · H hand lines · S screenshot</p>
+  </div>
+</section>
+
+<video id="video" playsinline muted hidden></video>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const HAND_MODEL = "../hand_landmarker.task";
+const FACE_MODEL = "../face_landmarker.task";
+
+// ---------------------------------------------------------------- tuning
+const PINCH_ON = 0.33, PINCH_OFF = 0.5;   // thumb-index distance / palm size (hysteresis)
+const THUMB_OUT = 0.65;                   // thumb tip to index knuckle / palm size: above = thumb sticking out
+const PINCH_HOLD = 0.35;                  // seconds a pinch on empty space must be held to change filter
+const FIST_FRAMES = 6;
+const BAR_H = 70;                         // top button bar: no drawing or grabbing up here
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), scene = $("scene"), ui = $("ui"), view = $("view");
+const sctx = scene.getContext("2d"), uctx = ui.getContext("2d");
+const mk = () => document.createElement("canvas");
+const frame = mk(), fctx = frame.getContext("2d", { willReadFrequently: true });
+const fx = mk(), xctx = fx.getContext("2d", { willReadFrequently: true });
+const ink = mk(), ictx = ink.getContext("2d");
+const tmp = mk(), tctx = tmp.getContext("2d", { willReadFrequently: true });
+
+let W = 1280, H = 720, mirror = true, running = false;
+let vision = null, handLm = null, faceLm = null, faceLoading = null;
+let ts = 0, lastVideoTime = -1;
+
+const status = (msg, err = false) => { $("status").textContent = msg; $("status").className = err ? "err" : ""; };
+let toastMsg = "", toastUntil = 0;
+const toast = (msg, secs = 1.3) => { toastMsg = msg; toastUntil = performance.now() / 1000 + secs; };
+
+// ---------------------------------------------------------------- models
+async function makeLandmarker(Cls, opts) {
+  try {
+    return await Cls.createFromOptions(vision, { ...opts, baseOptions: { ...opts.baseOptions, delegate: "GPU" } });
+  } catch (e) {
+    console.warn("GPU delegate failed, using CPU", e);
+    return await Cls.createFromOptions(vision, { ...opts, baseOptions: { ...opts.baseOptions, delegate: "CPU" } });
+  }
+}
+
+async function loadHands() {
+  if (location.protocol === "file:") {
+    status("Open this page with run_web.bat. The camera and the models need a local server.", true);
+    $("start").textContent = "Needs run_web.bat";
+    return;
+  }
+  try {
+    vision = await FilesetResolver.forVisionTasks(WASM);
+    handLm = await makeLandmarker(HandLandmarker, {
+      baseOptions: { modelAssetPath: HAND_MODEL }, runningMode: "VIDEO", numHands: 2,
+      minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+    });
+    $("start").disabled = false;
+    $("start").textContent = "Start camera";
+    status("Ready.");
+  } catch (e) {
+    console.error(e);
+    status("Could not load the hand model. Check your internet connection (the tracking library comes from a CDN) and that hand_landmarker.task is next to the web folder.", true);
+  }
+}
+
+function ensureFace() {
+  if (faceLoading) return;
+  toast("Loading face model…", 2);
+  faceLoading = makeLandmarker(FaceLandmarker, {
+    baseOptions: { modelAssetPath: FACE_MODEL }, runningMode: "VIDEO", numFaces: 2,
+  }).then((f) => { faceLm = f; }).catch((e) => { console.error(e); toast("Face model failed to load", 3); });
+}
+
+// ---------------------------------------------------------------- hands
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+const TIPS = [8, 12, 16, 20], PIPS = [6, 10, 14, 18];
+
+function buildHands(res) {
+  const out = [], seen = new Set();
+  const handed = res.handedness || res.handednesses || [];
+  res.landmarks.forEach((lms, i) => {
+    let label = handed[i]?.[0]?.categoryName ?? String(i);
+    if (seen.has(label)) label += i;  // the model sometimes labels both hands the same
+    seen.add(label);
+    const pts = lms.map((p) => [p.x * W, p.y * H]);
+    const size = Math.max(dist(pts[0], pts[9]), 1);
+    const up = TIPS.map((t, k) => dist(pts[t], pts[0]) > dist(pts[PIPS[k]], pts[0]) * 1.1);
+    out.push({
+      pts, label, size, up,
+      index: pts[8], thumb: pts[4],
+      pinchRatio: dist(pts[4], pts[8]) / size,
+      isFist: !up.some(Boolean),
+      isPointing: up[0] && !up[1] && !up[2],
+      thumbOut: dist(pts[4], pts[5]) / size > THUMB_OUT,
+      pinchPoint: [(pts[4][0] + pts[8][0]) / 2, (pts[4][1] + pts[8][1]) / 2],
+    });
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------- filters
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const HUE = new Uint8Array(360 * 3);
+for (let h = 0; h < 360; h++) {
+  const c = h / 60, i = c | 0, f = c - i, q = 1 - f;
+  const v = [[1, f, 0], [q, 1, 0], [0, 1, f], [0, q, 1], [f, 0, 1], [1, 0, q]][i % 6];
+  HUE.set(v.map((x) => Math.round(x * 255)), h * 3);
+}
+const PLASMA = (() => {
+  const stops = [[13, 8, 135], [126, 3, 168], [204, 71, 120], [248, 149, 64], [240, 249, 33]];
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const p = (i / 255) * (stops.length - 1), k = Math.min(p | 0, stops.length - 2), f = p - k;
+    for (let c = 0; c < 3; c++) lut[i * 3 + c] = Math.round(stops[k][c] * (1 - f) + stops[k + 1][c] * f);
+  }
+  return lut;
+})();
+
+const K = 0.5;  // pixel filters run at half resolution, then scale up
+function pixelOp(x, y, w, h, op, glow = 0) {
+  const sw = Math.max(2, Math.round(w * K)), sh = Math.max(2, Math.round(h * K));
+  if (tmp.width !== sw || tmp.height !== sh) { tmp.width = sw; tmp.height = sh; }
+  tctx.drawImage(frame, x, y, w, h, 0, 0, sw, sh);
+  const img = tctx.getImageData(0, 0, sw, sh);
+  op(img.data, sw, sh);
+  tctx.putImageData(img, 0, 0);
+  xctx.drawImage(tmp, 0, 0, sw, sh, x, y, w, h);
+  if (glow) {
+    xctx.save();
+    xctx.globalCompositeOperation = "lighter";
+    xctx.filter = `blur(${glow}px)`;
+    xctx.drawImage(tmp, 0, 0, sw, sh, x, y, w, h);
+    xctx.restore();
+  }
+}
+
+function edgeMask(d, w, h, lo, hi) {
+  const n = w * h, g = new Float32Array(n), m = new Uint8ClampedArray(n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const gx = g[i - w + 1] + 2 * g[i + 1] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - 1] - g[i + w - 1];
+      const gy = g[i + w - 1] + 2 * g[i + w] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - w] - g[i - w + 1];
+      m[i] = ((Math.hypot(gx, gy) - lo) / (hi - lo)) * 255;
+    }
+  }
+  return m;
+}
+
+function pixelate(x, y, w, h, block) {
+  const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
+  if (tmp.width !== sw || tmp.height !== sh) { tmp.width = sw; tmp.height = sh; }
+  tctx.drawImage(frame, x, y, w, h, 0, 0, sw, sh);
+  xctx.save();
+  xctx.imageSmoothingEnabled = false;
+  xctx.drawImage(tmp, 0, 0, sw, sh, x, y, w, h);
+  xctx.restore();
+}
+
+function copyRegion(x, y, w, h, filter = "none") {
+  xctx.save();
+  xctx.filter = filter;
+  xctx.drawImage(frame, x, y, w, h, x, y, w, h);
+  xctx.restore();
+}
+
+// region filters: draw a filtered copy of frame[x,y,w,h] into the fx canvas at the same place
+function neonEdges(x, y, w, h, t) {
+  pixelOp(x, y, w, h, (d, sw, sh) => {
+    const m = edgeMask(d, sw, sh, 45, 150), shift = t * 240;
+    for (let i = 0, j = 0; i < sw * sh; i++, j += 4) {
+      const a = m[i] / 255, px = i % sw, py = (i / sw) | 0;
+      const hk = (((((px + py) * 1.33 + shift) | 0) % 360) + 360) % 360 * 3;
+      d[j] = d[j] * 0.25 * (1 - a) + HUE[hk] * a;
+      d[j + 1] = d[j + 1] * 0.25 * (1 - a) + HUE[hk + 1] * a;
+      d[j + 2] = d[j + 2] * 0.25 * (1 - a) + HUE[hk + 2] * a;
+    }
+  }, 4);
+}
+function lineArt(x, y, w, h) {
+  pixelOp(x, y, w, h, (d, sw, sh) => {
+    const m = edgeMask(d, sw, sh, 40, 130);
+    for (let i = 0, j = 0; i < sw * sh; i++, j += 4) {
+      const a = m[i] / 255;
+      d[j] = 20 + (200 - 20) * a; d[j + 1] = 10 + (60 - 10) * a; d[j + 2] = 40 + (255 - 40) * a;
+    }
+  }, 3);
+}
+function thermal(x, y, w, h) {
+  pixelOp(x, y, w, h, (d) => {
+    for (let j = 0; j < d.length; j += 4) {
+      const g = ((0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2]) | 0) * 3;
+      d[j] = PLASMA[g]; d[j + 1] = PLASMA[g + 1]; d[j + 2] = PLASMA[g + 2];
+    }
+  });
+}
+function purpleGlass(x, y, w, h) {
+  copyRegion(x, y, w, h);
+  xctx.fillStyle = "rgba(130,20,160,0.65)";
+  xctx.fillRect(x, y, w, h);
+}
+function pixelFilter(x, y, w, h) { pixelate(x, y, w, h, 18); }
+function invert(x, y, w, h) { copyRegion(x, y, w, h, "invert(1)"); }
+function glitch(x, y, w, h, t) {
+  const s = Math.max(1, Math.round((6 + 4 * Math.sin(t * 8)) * K));
+  pixelOp(x, y, w, h, (d, sw, sh) => {
+    const src = d.slice();
+    for (let py = 0; py < sh; py++) {
+      for (let px = 0; px < sw; px++) {
+        const j = (py * sw + px) * 4;
+        d[j] = src[(py * sw + Math.max(px - s, 0)) * 4];                 // red slides right
+        d[j + 2] = src[(py * sw + Math.min(px + s, sw - 1)) * 4 + 2];    // blue slides left
+      }
+    }
+  });
+  xctx.fillStyle = "rgba(0,0,0,0.45)";
+  for (let yy = y; yy < y + h; yy += 3) xctx.fillRect(x, yy, w, 1);
+}
+function sketch(x, y, w, h) {
+  copyRegion(x, y, w, h, "grayscale(1)");
+  xctx.save();
+  xctx.globalCompositeOperation = "color-dodge";
+  xctx.filter = "grayscale(1) invert(1) blur(6px)";
+  xctx.drawImage(frame, x, y, w, h, x, y, w, h);
+  xctx.restore();
+}
+
+// face filters: get the face points too
+const TESS = FaceLandmarker.FACE_LANDMARKS_TESSELATION;
+const OVAL = FaceLandmarker.FACE_LANDMARKS_FACE_OVAL.map((c) => c.start);
+function cyberMesh(x, y, w, h, t, faces) {
+  copyRegion(x, y, w, h, "brightness(0.35)");
+  const p = 0.5 + 0.5 * Math.sin(t * 4), col = `rgb(255,${(80 + 120 * p) | 0},255)`;
+  xctx.save();
+  xctx.strokeStyle = col; xctx.lineWidth = 1; xctx.shadowColor = col; xctx.shadowBlur = 10;
+  xctx.beginPath();
+  for (const pts of faces) for (const c of TESS) { xctx.moveTo(...pts[c.start]); xctx.lineTo(...pts[c.end]); }
+  xctx.stroke(); xctx.stroke();
+  xctx.restore();
+}
+function shades(x, y, w, h, t, faces) {
+  copyRegion(x, y, w, h);
+  const GOLD = "rgb(255,215,0)", INK = "rgb(40,25,25)";
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const line = (a, b, width) => { xctx.beginPath(); xctx.moveTo(...a); xctx.lineTo(...b); xctx.lineWidth = width; xctx.stroke(); };
+  xctx.save();
+  xctx.lineCap = "round";
+  for (const p of faces) {
+    const re = mid(p[33], p[133]), le = mid(p[263], p[362]);
+    const ed = dist(re, le), ang = Math.atan2(le[1] - re[1], le[0] - re[0]);
+    const ax = ed * 0.42, ay = ed * 0.3, ux = Math.cos(ang), uy = Math.sin(ang);
+    for (const c of [re, le]) {
+      xctx.beginPath(); xctx.ellipse(c[0], c[1], ax, ay, ang, 0, Math.PI * 2);
+      xctx.fillStyle = "#141414"; xctx.fill();
+      xctx.strokeStyle = GOLD; xctx.lineWidth = 3; xctx.stroke();
+      xctx.beginPath();
+      xctx.ellipse(c[0] - ax * 0.35, c[1] - ay * 0.35, ax / 4, ay / 6, ang - Math.PI / 9, 0, Math.PI * 2);
+      xctx.fillStyle = "#e6e6e6"; xctx.fill();
+    }
+    xctx.strokeStyle = GOLD;
+    line([re[0] + ux * ax, re[1] + uy * ax], [le[0] - ux * ax, le[1] - uy * ax], 4);
+    const ro = [re[0] - ux * ax, re[1] - uy * ax], lo = [le[0] + ux * ax, le[1] + uy * ax];
+    line(ro, [ro[0] - ux * ed * 0.35, ro[1] - uy * ed * 0.35], 4);
+    line(lo, [lo[0] + ux * ed * 0.35, lo[1] + uy * ed * 0.35], 4);
+    const m = [p[164][0] * 0.6 + p[0][0] * 0.4, p[164][1] * 0.6 + p[0][1] * 0.4], mw = ed * 0.38;
+    xctx.fillStyle = INK;
+    for (const side of [-1, 1]) {
+      xctx.beginPath();
+      xctx.ellipse(m[0] + side * ux * mw * 0.55, m[1] + side * uy * mw * 0.55, mw * 0.6, mw * 0.22,
+        ang + side * Math.PI / 15, 0, Math.PI * 2);
+      xctx.fill();
+      xctx.beginPath();
+      xctx.arc(m[0] + side * ux * mw * 1.15, m[1] + side * uy * mw * 1.15 - mw * 0.25, Math.max(2, mw * 0.13), 0, Math.PI * 2);
+      xctx.fill();
+    }
+  }
+  xctx.restore();
+}
+function facePixel(x, y, w, h, t, faces) {
+  copyRegion(x, y, w, h);
+  for (const pts of faces) {
+    const oval = OVAL.map((i) => pts[i]);
+    const xs = oval.map((p) => p[0]), ys = oval.map((p) => p[1]);
+    const fx0 = Math.max(0, Math.min(...xs)), fy0 = Math.max(0, Math.min(...ys));
+    const fw = Math.min(W, Math.max(...xs)) - fx0, fh = Math.min(H, Math.max(...ys)) - fy0;
+    if (fw < 4 || fh < 4) continue;
+    xctx.save();
+    xctx.beginPath(); oval.forEach((p, i) => (i ? xctx.lineTo(...p) : xctx.moveTo(...p))); xctx.closePath(); xctx.clip();
+    pixelate(fx0, fy0, fw, fh, Math.max(6, fw / 10));
+    xctx.restore();
+  }
+}
+
+const FILTERS = [
+  { name: "Neon Edges", fn: neonEdges, edge: [255, 100, 255] },
+  { name: "Line Art", fn: lineArt, edge: [200, 60, 255] },
+  { name: "Thermal", fn: thermal, edge: [255, 80, 180] },
+  { name: "Cyber Mesh", fn: cyberMesh, edge: [255, 200, 255], face: true },
+  { name: "Shades", fn: shades, edge: [255, 215, 0], face: true },
+  { name: "Purple Glass", fn: purpleGlass, edge: [255, 255, 255] },
+  { name: "Pixelate", fn: pixelFilter, edge: [255, 255, 255] },
+  { name: "Face Pixel", fn: facePixel, edge: [255, 255, 255], face: true },
+  { name: "Glitch", fn: glitch, edge: [0, 255, 255] },
+  { name: "Invert", fn: invert, edge: [255, 255, 0] },
+  { name: "Sketch", fn: sketch, edge: [255, 255, 255] },
+];
+let filterIdx = 0;
+function setFilter(i) {
+  filterIdx = ((i % FILTERS.length) + FILTERS.length) % FILTERS.length;
+  toast(`Filter: ${FILTERS[filterIdx].name}`);
+  if (FILTERS[filterIdx].face) ensureFace();
+}
+
+// ---------------------------------------------------------------- stickers
+class Item {
+  constructor(img, cx, cy, scale = 1, angle = 0) {
+    Object.assign(this, { img, cx, cy, scale, angle, grabSig: null, ref: null });
+  }
+  contains([px, py]) {
+    const dx = px - this.cx, dy = py - this.cy, c = Math.cos(-this.angle), s = Math.sin(-this.angle);
+    const u = (dx * c - dy * s) / this.scale, v = (dx * s + dy * c) / this.scale;
+    return Math.abs(u) <= this.img.width / 2 && Math.abs(v) <= this.img.height / 2;
+  }
+  apply(ctx) { ctx.translate(this.cx, this.cy); ctx.rotate(this.angle); ctx.scale(this.scale, this.scale); }
+  draw(ctx) {
+    ctx.save(); this.apply(ctx);
+    ctx.drawImage(this.img, -this.img.width / 2, -this.img.height / 2);
+    ctx.restore();
+  }
+  outline(ctx) {
+    ctx.save(); this.apply(ctx);
+    ctx.strokeStyle = "rgb(120,255,0)"; ctx.lineWidth = 2 / this.scale;
+    ctx.strokeRect(-this.img.width / 2, -this.img.height / 2, this.img.width, this.img.height);
+    ctx.restore();
+  }
+}
+
+function neonSticker(draw) {
+  const c = mk(); c.width = c.height = 200;
+  const g = c.getContext("2d");
+  g.shadowBlur = 22;
+  draw(g); draw(g);
+  return c;
+}
+function defaultStickers() {
+  const star = (g) => {
+    g.fillStyle = g.shadowColor = "rgb(255,215,0)";
+    g.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 ? 34 : 80, a = -Math.PI / 2 + (i * Math.PI) / 5;
+      g.lineTo(100 + r * Math.cos(a), 100 + r * Math.sin(a));
+    }
+    g.fill();
+  };
+  const heart = (g) => {
+    g.fillStyle = g.shadowColor = "rgb(255,40,180)";
+    g.beginPath(); g.arc(70, 80, 42, 0, Math.PI * 2); g.arc(130, 80, 42, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.moveTo(30, 98); g.lineTo(170, 98); g.lineTo(100, 175); g.fill();
+  };
+  const ring = (g) => {
+    g.strokeStyle = g.shadowColor = "rgb(0,255,255)"; g.lineWidth = 14;
+    g.beginPath(); g.arc(100, 100, 70, 0, Math.PI * 2); g.stroke();
+    g.fillStyle = g.shadowColor = "rgb(255,0,255)";
+    g.beginPath(); g.arc(100, 100, 30, 0, Math.PI * 2); g.fill();
+  };
+  const hello = (g) => {
+    g.strokeStyle = g.shadowColor = "rgb(120,255,0)"; g.lineWidth = 4; g.strokeRect(15, 60, 170, 80);
+    g.fillStyle = "#fff"; g.font = "700 36px 'Space Grotesk', system-ui, sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle"; g.fillText("HELLO!", 100, 102);
+  };
+  return [star, heart, ring, hello].map(neonSticker);
+}
+
+// PNG/JPG files in ../stickers/ (python's server lists the folder as HTML)
+let customStickers = [];
+async function loadCustomStickers() {
+  try {
+    const html = await (await fetch("../stickers/")).text();
+    const names = [...html.matchAll(/href="([^"]+\.(?:png|jpe?g))"/gi)].map((m) => m[1]);
+    customStickers = (await Promise.all(names.map((n) => new Promise((ok) => {
+      const img = new Image();
+      img.onload = () => {
+        const s = 240 / Math.max(img.width, img.height), c = mk();
+        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        ok(c);
+      };
+      img.onerror = () => ok(null);
+      img.src = "../stickers/" + n;
+    })))).filter(Boolean);
+  } catch { customStickers = []; }
+}
+
+let items = [];
+const grabs = new Map();  // hand label -> Item
+function resetStickers() {
+  const imgs = [...customStickers, ...defaultStickers()];
+  const s = Math.min(0.6, (W * 0.9) / imgs.length / 200);
+  items = imgs.map((img, i) => new Item(img, (W * (i + 1)) / (imgs.length + 1), H * 0.8, s));
+  grabs.clear();
+}
+function snap() {
+  const pw = 320, ph = Math.round((320 * H) / W), c = mk();
+  c.width = pw + 24; c.height = ph + 62;
+  const g = c.getContext("2d");
+  g.fillStyle = "#fafafa"; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(frame, 12, 12, pw, ph);
+  g.fillStyle = "#3c3c3c"; g.font = "600 17px 'Space Grotesk', system-ui, sans-serif";
+  g.fillText("hand-portal", 16, c.height - 20);
+  items.push(new Item(c, W / 2, H / 2, Math.min(0.9, (H * 0.5) / c.height), (-6 * Math.PI) / 180));
+  toast("Photo snapped. Pinch it to move it");
+}
+
+// ---------------------------------------------------------------- drawing
+const COLORS = [["Pink", [255, 0, 255]], ["Cyan", [0, 255, 255]], ["Lime", [120, 255, 0]],
+  ["Gold", [255, 215, 0]], ["Red", [255, 60, 60]], ["White", [255, 255, 255]]];
+let inkColor = COLORS[0][1], eraser = false, thickness = 8;
+const prevTip = new Map(), tipSmooth = new Map();
+function clearInk() { ictx.clearRect(0, 0, W, H); toast("Drawing cleared"); }
+
+// ---------------------------------------------------------------- hover buttons
+class DwellButton {
+  constructor(label, color, action, dwell = 0.6) { Object.assign(this, { label, color, action, dwell, since: null, fired: false, rect: [0, 0, 0, 0] }); }
+  contains([px, py]) { const [x, y, w, h] = this.rect; return px >= x && px <= x + w && py >= y && py <= y + h; }
+  update(pointers, now) {
+    if (pointers.some((p) => this.contains(p))) {
+      if (this.since === null) this.since = now;
+      else if (!this.fired && now - this.since >= this.dwell) { this.fired = true; return true; }
+    } else { this.since = null; this.fired = false; }
+    return false;
+  }
+  draw(ctx, now, active) {
+    const [x, y, w, h] = this.rect;
+    ctx.fillStyle = rgb(this.color, 0.78); ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = active ? "#fff" : "rgba(255,255,255,0.4)"; ctx.lineWidth = active ? 3 : 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    const light = this.color[0] + this.color[1] + this.color[2] > 450;
+    ctx.fillStyle = light ? "#000" : "#fff";
+    ctx.font = `600 ${Math.max(10, Math.min(15, w / 6))}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(this.label, x + w / 2, y + h / 2);
+    if (this.since !== null && !this.fired) {
+      ctx.fillStyle = "rgb(0,255,120)";
+      ctx.fillRect(x, y + h - 6, (w * Math.min((now - this.since) / this.dwell, 1)) | 0, 6);
+    }
+  }
+}
+const buttons = [
+  ...COLORS.map(([name, col]) => new DwellButton(name, col, () => { inkColor = col; eraser = false; toast(`Colour: ${name}`); }, 0.5)),
+  new DwellButton("Eraser", [40, 40, 40], () => { eraser = true; toast("Eraser"); }, 0.5),
+  new DwellButton("Clear", [120, 30, 30], clearInk, 0.8),
+  new DwellButton("Snap", [20, 50, 90], snap, 0.8),
+  new DwellButton("Reset", [70, 30, 90], () => { resetStickers(); toast("Stickers reset"); }, 0.8),
+];
+function layoutButtons() {
+  const gap = 6, bw = Math.min(104, (W - 20 - gap * (buttons.length - 1)) / buttons.length);
+  buttons.forEach((b, i) => { b.rect = [10 + i * (bw + gap), 10, bw, 50]; });
+}
+
+// ---------------------------------------------------------------- per-frame logic
+const pinchState = new Map();  // label -> {was, holdStart, fired}
+let fistCount = 0, cooldown = 0, polySm = null, showHands = true, fps = 0, prevNow = 0;
+let lastHands = [], drawingSet = new Set(), framingSet = new Set();
+
+function step(now) {
+  fctx.save();
+  if (mirror) { fctx.translate(W, 0); fctx.scale(-1, 1); }
+  fctx.drawImage(video, 0, 0, W, H);
+  fctx.restore();
+
+  ts = Math.max(Math.round(performance.now()), ts + 1);
+  const hands = buildHands(handLm.detectForVideo(frame, ts));
+  lastHands = hands;
+  const labels = new Set(hands.map((h) => h.label));
+  for (const l of [...pinchState.keys()]) if (!labels.has(l)) { pinchState.delete(l); grabs.delete(l); prevTip.delete(l); tipSmooth.delete(l); }
+
+  // pinch state with hysteresis
+  for (const h of hands) {
+    const st = pinchState.get(h.label) || { was: false, holdStart: null, fired: false };
+    h.pinched = !h.isFist && h.pinchRatio < (st.was ? PINCH_OFF : PINCH_ON);
+    h.pinchStart = h.pinched && !st.was;
+    st.was = h.pinched;
+    pinchState.set(h.label, st);
+  }
+
+  // hover buttons: any raised index fingertip that is not pinching
+  const pointers = hands.filter((h) => h.up[0] && !h.pinched).map((h) => h.index);
+  for (const b of buttons) if (b.update(pointers, now)) b.action();
+
+  // grab stickers where a pinch starts
+  for (const h of hands) {
+    if (h.pinchStart && h.pinchPoint[1] > BAR_H) {
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].contains(h.pinchPoint)) {
+          const it = items.splice(i, 1)[0];
+          items.push(it);
+          grabs.set(h.label, it);
+          break;
+        }
+      }
+    } else if (!h.pinched) grabs.delete(h.label);
+  }
+
+  // change filter: hold a pinch on empty space, or make a fist
+  let pinchFire = false;
+  for (const h of hands) {
+    const st = pinchState.get(h.label);
+    const free = h.pinched && !grabs.has(h.label) && h.pinchPoint[1] > BAR_H;
+    if (!free) { st.holdStart = null; st.fired = false; continue; }
+    if (st.holdStart === null && !st.fired) st.holdStart = now;
+    if (st.holdStart !== null && now - st.holdStart >= PINCH_HOLD) { st.holdStart = null; st.fired = true; pinchFire = true; }
+  }
+  fistCount = hands.some((h) => h.isFist) ? fistCount + 1 : 0;
+  if ((pinchFire || fistCount === FIST_FRAMES) && now > cooldown) { setFilter(filterIdx + 1); cooldown = now + 0.8; }
+
+  // move / resize / rotate grabbed stickers
+  const held = new Map();
+  for (const [label, it] of grabs) { if (!held.has(it)) held.set(it, []); held.get(it).push(label); }
+  for (const it of items) if (!held.has(it)) it.grabSig = null;
+  const pp = Object.fromEntries(hands.map((h) => [h.label, h.pinchPoint]));
+  for (const [it, ls] of held) {
+    ls.sort();
+    const sig = ls.join("|");
+    if (ls.length >= 2) {
+      const p1 = pp[ls[0]], p2 = pp[ls[1]];
+      const mid = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2], d = Math.max(dist(p1, p2), 1);
+      const ang = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+      if (it.grabSig !== sig) { it.grabSig = sig; it.ref = { d, s: it.scale, a: ang, ia: it.angle, ox: it.cx - mid[0], oy: it.cy - mid[1] }; }
+      const r = it.ref, da = ang - r.a;
+      it.scale = Math.min(5, Math.max(0.15, (r.s * d) / r.d));
+      it.angle = r.ia + da;
+      const k = it.scale / r.s, c = Math.cos(da), s = Math.sin(da);
+      it.cx = mid[0] + (r.ox * c - r.oy * s) * k;
+      it.cy = mid[1] + (r.ox * s + r.oy * c) * k;
+    } else {
+      const p = pp[ls[0]];
+      if (it.grabSig !== sig) { it.grabSig = sig; it.ref = { ox: it.cx - p[0], oy: it.cy - p[1] }; }
+      it.cx = p[0] + it.ref.ox; it.cy = p[1] + it.ref.oy;
+    }
+  }
+
+  // portal: both hands in an L (index up, thumb out)
+  const framing = hands.filter((h) => h.up[0] && h.thumbOut && !h.pinched && !h.isFist && !grabs.has(h.label));
+  framingSet = new Set();
+  let poly = null;
+  if (framing.length >= 2) {
+    const [a, b] = framing.slice(0, 2).sort((p, q) => p.pts[0][0] - q.pts[0][0]);
+    framingSet = new Set([a.label, b.label]);
+    const raw = [a.index, b.index, b.thumb, a.thumb].flat();
+    polySm = polySm ? polySm.map((v, i) => 0.55 * raw[i] + 0.45 * v) : raw;
+    poly = [0, 2, 4, 6].map((i) => [polySm[i], polySm[i + 1]]);
+  } else polySm = null;
+
+  // drawing: point with the index finger, thumb tucked in
+  drawingSet = new Set();
+  for (const h of hands) {
+    const prev = tipSmooth.get(h.label);
+    const tip = prev ? [0.5 * h.index[0] + 0.5 * prev[0], 0.5 * h.index[1] + 0.5 * prev[1]] : h.index;
+    tipSmooth.set(h.label, tip);
+    const drawing = h.isPointing && !h.thumbOut && !h.pinched && !framingSet.has(h.label) && tip[1] > BAR_H;
+    if (!drawing) { prevTip.delete(h.label); continue; }
+    drawingSet.add(h.label);
+    const last = prevTip.get(h.label);
+    if (last) {
+      ictx.save();
+      ictx.lineCap = "round"; ictx.lineJoin = "round";
+      if (eraser) { ictx.globalCompositeOperation = "destination-out"; ictx.lineWidth = thickness * 5; ictx.strokeStyle = "#000"; }
+      else { ictx.lineWidth = thickness; ictx.strokeStyle = rgb(inkColor); }
+      ictx.beginPath(); ictx.moveTo(...last); ictx.lineTo(...tip); ictx.stroke();
+      ictx.restore();
+    }
+    prevTip.set(h.label, tip);
+  }
+
+  // ---- compose the scene: camera -> portal -> ink -> stickers
+  sctx.drawImage(frame, 0, 0);
+  if (poly) renderPortal(poly, now);
+  sctx.drawImage(ink, 0, 0);
+  sctx.save();
+  sctx.globalCompositeOperation = "lighter";
+  sctx.filter = "blur(7px)";
+  sctx.drawImage(ink, 0, 0);
+  sctx.restore();
+  for (const it of items) it.draw(sctx);
+
+  fps = 0.9 * fps + 0.1 / Math.max(now - prevNow, 1e-3);
+  prevNow = now;
+  drawUI(hands, now);
+}
+
+function renderPortal(poly, now) {
+  const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+  const x = Math.max(0, Math.floor(Math.min(...xs))), y = Math.max(0, Math.floor(Math.min(...ys)));
+  const w = Math.min(W, Math.ceil(Math.max(...xs))) - x, h = Math.min(H, Math.ceil(Math.max(...ys))) - y;
+  if (w < 4 || h < 4) return;
+  const f = FILTERS[filterIdx];
+  let faces = [];
+  if (f.face) {
+    if (faceLm) faces = faceLm.detectForVideo(frame, ts).faceLandmarks.map((pts) => pts.map((p) => [p.x * W, p.y * H]));
+    else ensureFace();
+  }
+  f.fn(x, y, w, h, now, faces);
+
+  const path = () => { sctx.beginPath(); poly.forEach((p, i) => (i ? sctx.lineTo(...p) : sctx.moveTo(...p))); sctx.closePath(); };
+  sctx.save(); path(); sctx.clip(); sctx.drawImage(fx, x, y, w, h, x, y, w, h); sctx.restore();
+  sctx.save();
+  path(); sctx.strokeStyle = sctx.shadowColor = rgb(f.edge); sctx.shadowBlur = 22; sctx.lineWidth = 5; sctx.stroke();
+  sctx.shadowBlur = 0; sctx.strokeStyle = "#fff"; sctx.lineWidth = 2; sctx.stroke();
+  sctx.restore();
+}
+
+function drawUI(hands, now) {
+  const g = uctx;
+  g.clearRect(0, 0, W, H);
+  buttons.forEach((b, i) => b.draw(g, now, i < COLORS.length ? !eraser && inkColor === COLORS[i][1] : i === COLORS.length && eraser));
+
+  g.save();
+  g.font = "700 22px 'Space Grotesk', system-ui, sans-serif"; g.textAlign = "left"; g.textBaseline = "alphabetic";
+  g.lineWidth = 4; g.strokeStyle = "rgba(0,0,0,0.6)";
+  const label = `Filter ${filterIdx + 1}/${FILTERS.length}: ${FILTERS[filterIdx].name}`;
+  g.strokeText(label, 14, BAR_H + 28); g.fillStyle = "#fff"; g.fillText(label, 14, BAR_H + 28);
+  g.restore();
+
+  for (const it of items) if (it.grabSig !== null) it.outline(g);
+
+  for (const h of hands) {
+    if (showHands) {
+      g.strokeStyle = "rgba(230,230,230,0.8)"; g.lineWidth = 1; g.beginPath();
+      for (const c of HandLandmarker.HAND_CONNECTIONS) { g.moveTo(...h.pts[c.start]); g.lineTo(...h.pts[c.end]); }
+      g.stroke();
+    }
+    if (h.pinched) {
+      g.fillStyle = "rgb(120,255,0)";
+      g.beginPath(); g.arc(...h.pinchPoint, 10, 0, Math.PI * 2); g.fill();
+      const st = pinchState.get(h.label);
+      if (st?.holdStart != null) {
+        g.strokeStyle = "rgb(120,255,0)"; g.lineWidth = 3; g.beginPath();
+        g.arc(...h.pinchPoint, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min((now - st.holdStart) / PINCH_HOLD, 1));
+        g.stroke();
+      }
+    } else if (h.up[0]) {
+      const r = eraser ? (thickness * 5) / 2 : thickness;
+      g.beginPath(); g.arc(...h.index, Math.max(r, 6), 0, Math.PI * 2);
+      if (drawingSet.has(h.label)) {
+        if (eraser) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke(); } else { g.fillStyle = rgb(inkColor); g.fill(); }
+      } else { g.strokeStyle = framingSet.has(h.label) ? "rgba(255,255,255,0.9)" : rgb(inkColor, 0.8); g.lineWidth = 2; g.stroke(); }
+    }
+  }
+
+  // hint bar
+  g.fillStyle = "rgba(0,0,0,0.72)"; g.fillRect(0, H - 30, W, 30);
+  g.font = "500 13px Inter, system-ui, sans-serif"; g.textBaseline = "middle"; g.textAlign = "left"; g.fillStyle = "#ddd";
+  const hint = W > 900
+    ? "Both hands in an L = portal  ·  point (thumb tucked) = draw  ·  pinch a sticker = move  ·  hold a pinch or fist = next filter"
+    : "L-hands = portal · point = draw · pinch = move · fist = filter";
+  g.fillText(hint, 10, H - 15);
+  g.font = "600 13px Inter, system-ui, sans-serif"; g.textAlign = "right"; g.fillStyle = "rgb(120,255,120)";
+  g.fillText(`${fps.toFixed(0)} fps`, W - 12, BAR_H + 22);
+
+  if (performance.now() / 1000 < toastUntil) {
+    g.font = "700 26px 'Space Grotesk', system-ui, sans-serif"; g.textAlign = "center";
+    const tw = g.measureText(toastMsg).width, ty = H * 0.62;
+    g.fillStyle = "rgba(0,0,0,0.75)"; g.fillRect(W / 2 - tw / 2 - 18, ty - 24, tw + 36, 48);
+    g.fillStyle = "#fff"; g.fillText(toastMsg, W / 2, ty);
+  }
+}
+
+// ---------------------------------------------------------------- setup + loop
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  view.style.width = `${Math.floor(W * s)}px`;
+  view.style.height = `${Math.floor(H * s)}px`;
+}
+addEventListener("resize", fit);
+
+let srcW = 0, srcH = 0;  // camera size the canvases were last built for
+function sizeTo(vw, vh) {
+  srcW = vw; srcH = vh;
+  const s = Math.min(1, 1280 / Math.max(vw, vh));
+  W = Math.round(vw * s); H = Math.round(vh * s);
+  for (const c of [scene, ui, frame, fx, ink]) { c.width = W; c.height = H; }
+  layoutButtons(); resetStickers(); fit();
+}
+
+function loop() {
+  if (!running) return;
+  // cameras can report a tiny size at first and the real one a moment later
+  if (video.videoWidth > 16 && (video.videoWidth !== srcW || video.videoHeight !== srcH)) {
+    sizeTo(video.videoWidth, video.videoHeight);
+  }
+  if (srcW > 16 && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    try { step(performance.now() / 1000); } catch (e) { console.error(e); }
+  }
+  requestAnimationFrame(loop);
+}
+
+async function begin() {
+  await video.play();
+  sizeTo(video.videoWidth, video.videoHeight);
+  $("intro").hidden = true;
+  running = true;
+  toast("Make an L with both hands");
+  requestAnimationFrame(loop);
+}
+
+$("start").addEventListener("click", async () => {
+  try {
+    status("Waiting for camera permission…");
+    video.srcObject = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false,
+    });
+    mirror = true;
+    await begin();
+  } catch (e) {
+    console.error(e);
+    status(e.name === "NotAllowedError" ? "Camera access was blocked. Allow it in the address bar and try again."
+      : "Could not open the camera. Close other apps that use it (including the Python app) and try again.", true);
+  }
+});
+
+$("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file || !handLm) return;
+  video.srcObject = null;
+  video.src = URL.createObjectURL(file);
+  video.loop = true;
+  mirror = false;
+  await new Promise((ok) => video.addEventListener("loadeddata", ok, { once: true }));
+  await begin();
+});
+
+addEventListener("keydown", (e) => {
+  if (!running) return;
+  const k = e.key.toLowerCase();
+  if (k >= "1" && k <= "9") setFilter(+k - 1);
+  else if (k === "0") setFilter(9);
+  else if (k === "n") setFilter(filterIdx + 1);
+  else if (k === "b") setFilter(filterIdx - 1);
+  else if (k === "c") clearInk();
+  else if (k === "e") { eraser = !eraser; toast(eraser ? "Eraser" : "Pen"); }
+  else if (k === "+" || k === "=") thickness = Math.min(thickness + 2, 40);
+  else if (k === "-") thickness = Math.max(thickness - 2, 2);
+  else if (k === "p") snap();
+  else if (k === "r") { resetStickers(); toast("Stickers reset"); }
+  else if (k === "h") showHands = !showHands;
+  else if (k === "s") {
+    const a = document.createElement("a");
+    a.href = scene.toDataURL("image/png");
+    a.download = `hand-portal-${Date.now()}.png`;
+    a.click();
+    toast("Screenshot saved");
+  }
+});
+
+loadCustomStickers();
+loadHands();
+</script>
+</body>
+</html>
