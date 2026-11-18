@@ -35,7 +35,8 @@ const shot = async (name) => {
 };
 
 await send("Runtime.enable"); await send("Page.enable");
-await send("Page.navigate", { url: "http://127.0.0.1:8765/web/" });
+// optional arg: page URL, e.g. the live site https://sesili-a.github.io/hand-portal/web/
+await send("Page.navigate", { url: process.argv[2] || "http://127.0.0.1:8765/web/" });
 for (let i = 0; i < 120; i++) { if (await ev("!document.getElementById('start').disabled")) break; await sleep(500); }
 console.log("status:", await ev("document.getElementById('status').textContent"));
 await shot("01_intro");

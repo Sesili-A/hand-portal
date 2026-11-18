@@ -627,7 +627,10 @@ function step(now) {
     framingSet = new Set([a.label, b.label]);
     const raw = [a.index, b.index, b.thumb, a.thumb].flat();
     polySm = polySm ? polySm.map((v, i) => 0.55 * raw[i] + 0.45 * v) : raw;
-    poly = [0, 2, 4, 6].map((i) => [polySm[i], polySm[i + 1]]);
+    // join corners by angle around the centre so tilted hands never make a crossed "bow-tie"
+    const pts4 = [0, 2, 4, 6].map((i) => [polySm[i], polySm[i + 1]]);
+    const cx = pts4.reduce((s, p) => s + p[0], 0) / 4, cy = pts4.reduce((s, p) => s + p[1], 0) / 4;
+    poly = pts4.sort((p, q) => Math.atan2(p[1] - cy, p[0] - cx) - Math.atan2(q[1] - cy, q[0] - cx));
   } else polySm = null;
 
   // drawing: point with the index finger, thumb tucked in
