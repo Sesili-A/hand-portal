@@ -53,17 +53,84 @@
   #status.err { color: #ff8a8a; }
   .keys { margin: 0; font-size: 0.8rem; color: var(--muted); }
   @media (max-width: 480px) { .moves li { grid-template-columns: 1fr; gap: 2px; } }
+
+  /* bottom mode bar: local filter / Live AI / settings */
+  #modes {
+    position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+    display: flex; gap: 8px; padding: 6px; border-radius: 14px;
+    background: rgba(10, 8, 20, 0.6); border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(6px);
+  }
+  #modes button { padding: 9px 14px; font-size: 0.88rem; border-radius: 10px; background: rgba(255,255,255,0.06); white-space: nowrap; }
+  #modes button[aria-pressed="true"] { background: var(--fg); color: #14111f; border-color: var(--fg); }
+  #modes #aiBtn[aria-pressed="true"] { background: #3c6e57; color: #fff; border-color: #5c9a7d; }
+  #modes .tag { opacity: 0.6; font-weight: 500; }
+  #gear { width: 40px; padding: 0; display: grid; place-items: center; }
+  #gear svg { width: 18px; height: 18px; }
+
+  dialog {
+    width: min(460px, calc(100% - 32px)); background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 14px; padding: 24px;
+  }
+  dialog::backdrop { background: rgba(4, 3, 10, 0.6); }
+  dialog h2 { font-family: var(--display); margin: 0 0 6px; font-size: 1.3rem; }
+  dialog form { display: grid; gap: 14px; }
+  dialog label { display: grid; gap: 6px; font-size: 0.85rem; color: var(--muted); }
+  dialog input[type=password], dialog input[type=text], dialog select, dialog textarea {
+    font: 0.93rem var(--body); color: var(--fg); background: #0b0a14; border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  dialog textarea { resize: vertical; min-height: 3.5em; }
+  dialog .row { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 0.85rem; }
+  dialog .note { margin: 0; font-size: 0.8rem; color: var(--muted); line-height: 1.45; }
+  dialog .note a { color: var(--accent-2); }
+  dialog .actions { justify-content: flex-end; }
+  #saveSettings { background: var(--accent); border-color: var(--accent); color: #1a0716; }
 </style>
 </head>
 <body>
-<main id="stage"><div id="view"><canvas id="scene"></canvas><canvas id="ui"></canvas></div></main>
+<main id="stage"><div id="view"><canvas id="scene"></canvas><canvas id="ui"></canvas>
+  <nav id="modes" hidden aria-label="Portal mode">
+    <button id="localBtn" aria-pressed="true" title="Click for the next free filter (or make a fist)"><span id="localName">Heatmap</span> <span class="tag">· Free</span></button>
+    <button id="aiBtn" aria-pressed="false" title="Turn the inside of the portal into anime with Decart's real-time AI (A)">Live AI</button>
+    <button id="gear" aria-label="Live AI settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
+  </nav>
+</div></main>
+
+<dialog id="settings">
+  <form method="dialog">
+    <div>
+      <h2>Live AI</h2>
+      <p class="note" id="settingsMsg">Inside the portal, the camera is replaced by a real-time AI restyle from Decart. This sends your camera video to Decart while Live AI is on.</p>
+    </div>
+    <label>Decart API key
+      <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="dct_…">
+    </label>
+    <label class="row"><input id="rememberKey" type="checkbox"> Remember the key in this browser</label>
+    <label>Style prompt
+      <textarea id="aiPrompt" rows="2"></textarea>
+    </label>
+    <label>Model
+      <select id="aiModel">
+        <option value="lucy-restyle-2">lucy-restyle-2 (style transfer, $0.01/s)</option>
+        <option value="lucy-2.6">lucy-2.6 (stronger edits, $0.02/s)</option>
+      </select>
+    </label>
+    <p class="note">If you still look too much like your real self and not enough like a drawn character, switch to lucy-2.6: it changes the picture more.</p>
+    <p class="note">Get a key at <a href="https://platform.decart.ai" target="_blank" rel="noopener">platform.decart.ai</a> (new accounts get free credits). Billing is per second while Live AI is connected; it switches itself off after 60 s without a portal.</p>
+    <div class="actions">
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button id="saveSettings" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
 
 <section id="intro">
   <div class="card">
     <h1>Hand <span>Portal</span></h1>
     <p class="lede">Filters, drawing and stickers, all controlled with your hands at the same time. Nothing leaves your computer: the camera is processed in this browser tab.</p>
     <ul class="moves">
-      <li><b>Open a portal</b><span>Make an L with thumb and index on both hands. The filter shows inside the frame, including face filters.</span></li>
+      <li><b>Open a portal</b><span>Make an L with thumb and index on both hands. The filter shows inside the frame. Two people can each open their own.</span></li>
+      <li><b>Live AI</b><span>Turn on Live AI at the bottom to see yourself as anime inside the frame (needs a Decart API key).</span></li>
       <li><b>Change filter</b><span>Hold a pinch on empty space, or make a fist.</span></li>
       <li><b>Draw</b><span>Point with your index finger, thumb tucked in. Hover the colour buttons at the top to change colour.</span></li>
       <li><b>Move stickers</b><span>Pinch a sticker to drag it. Pinch it with both hands to resize and rotate.</span></li>
@@ -73,11 +140,12 @@
       <label class="file">Use a video file<input id="file" type="file" accept="video/*"></label>
     </div>
     <p id="status"></p>
-    <p class="keys">Keys: N / B filter · C clear drawing · E eraser · +/− pen size · P snap photo · R reset stickers · H hand lines · F fps · S screenshot</p>
+    <p class="keys">Keys: A Live AI · N / B filter · C clear drawing · E eraser · +/− pen size · P snap photo · R reset stickers · H hand lines · F fps · S screenshot</p>
   </div>
 </section>
 
 <video id="video" playsinline muted hidden></video>
+<video id="aiVideo" playsinline muted autoplay hidden></video>
 
 <script type="module">
 import { FilesetResolver, HandLandmarker, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
@@ -91,6 +159,7 @@ const PINCH_ON = 0.33, PINCH_OFF = 0.5;   // thumb-index distance / palm size (h
 const THUMB_OUT = 0.65;                   // thumb tip to index knuckle / palm size: above = thumb sticking out
 const PINCH_HOLD = 0.35;                  // seconds a pinch on empty space must be held to change filter
 const FIST_FRAMES = 6;
+const MAX_HANDS = 4;                      // two people, one portal each
 let BAR_H = 80;                           // top button bar: no drawing or grabbing up here (set by layoutButtons)
 
 const $ = (id) => document.getElementById(id);
@@ -113,11 +182,13 @@ let toastMsg = "", toastUntil = 0;
 const toast = (msg, secs = 1.3) => { toastMsg = msg; toastUntil = performance.now() / 1000 + secs; };
 
 // ---------------------------------------------------------------- models
+let delegate = "GPU";
 async function makeLandmarker(Cls, opts) {
   try {
     return await Cls.createFromOptions(vision, { ...opts, baseOptions: { ...opts.baseOptions, delegate: "GPU" } });
   } catch (e) {
     console.warn("GPU delegate failed, using CPU", e);
+    delegate = "CPU";
     return await Cls.createFromOptions(vision, { ...opts, baseOptions: { ...opts.baseOptions, delegate: "CPU" } });
   }
 }
@@ -131,7 +202,7 @@ async function loadHands() {
   try {
     vision = await FilesetResolver.forVisionTasks(WASM);
     handLm = await makeLandmarker(HandLandmarker, {
-      baseOptions: { modelAssetPath: HAND_MODEL }, runningMode: "VIDEO", numHands: 2,
+      baseOptions: { modelAssetPath: HAND_MODEL }, runningMode: "VIDEO", numHands: MAX_HANDS,
       minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5,
     });
     $("start").disabled = false;
@@ -147,7 +218,7 @@ function ensureFace() {
   if (faceLoading) return;
   toast("Loading face model…", 2);
   faceLoading = makeLandmarker(FaceLandmarker, {
-    baseOptions: { modelAssetPath: FACE_MODEL }, runningMode: "VIDEO", numFaces: 1,
+    baseOptions: { modelAssetPath: FACE_MODEL }, runningMode: "VIDEO", numFaces: MAX_HANDS / 2,
   }).then((f) => { faceLm = f; }).catch((e) => { console.error(e); toast("Face model failed to load", 3); });
 }
 
@@ -171,14 +242,29 @@ class Euro {
   }
 }
 
+// Stable hand ids: with up to 4 hands, "Left"/"Right" is not enough. Match each hand to the
+// nearest hand of recent frames by palm position; unmatched tracks survive a few frames.
+let nextHandId = 1, tracks = [];  // {id, p, age}
+function assignIds(palms) {
+  const cand = [];
+  palms.forEach((p, i) => tracks.forEach((t) => cand.push([dist(p, t.p), i, t])));
+  cand.sort((a, b) => a[0] - b[0]);
+  const ids = palms.map(() => null), taken = new Set();
+  for (const [d, i, t] of cand) {
+    if (d > W * 0.22 || ids[i] !== null || taken.has(t)) continue;
+    ids[i] = t.id; taken.add(t); t.p = palms[i]; t.age = 0;
+  }
+  tracks = tracks.filter((t) => taken.has(t) || ++t.age < 8);
+  palms.forEach((p, i) => { if (ids[i] === null) { ids[i] = nextHandId++; tracks.push({ id: ids[i], p, age: 0 }); } });
+  return ids.map((id) => "h" + id);
+}
+
 function buildHands(res) {
-  const out = [], seen = new Set();
-  const handed = res.handedness || res.handednesses || [];
-  res.landmarks.forEach((lms, i) => {
-    let label = handed[i]?.[0]?.categoryName ?? String(i);
-    if (seen.has(label)) label += i;  // the model sometimes labels both hands the same
-    seen.add(label);
-    const pts = lms.map((p) => [(mirror ? 1 - p.x : p.x) * W, p.y * H]);  // detection runs on the raw video
+  const out = [];
+  const all = res.landmarks.map((lms) => lms.map((p) => [(mirror ? 1 - p.x : p.x) * W, p.y * H]));  // detection runs on the raw video
+  const labels = assignIds(all.map((pts) => pts[9]));
+  all.forEach((pts, i) => {
+    const label = labels[i];
     const size = Math.max(dist(pts[0], pts[9]), 1);
     const up = TIPS.map((t, k) => dist(pts[t], pts[0]) > dist(pts[PIPS[k]], pts[0]) * 1.1);
     out.push({
@@ -292,6 +378,27 @@ function thermal(x, y, w, h) {
     }
   });
 }
+// jet-style rainbow: dark = blue, mid = green, bright = yellow/red
+const JET = (() => {
+  const stops = [[0, 0, 140], [0, 60, 255], [0, 220, 255], [60, 255, 120], [230, 255, 0], [255, 140, 0], [220, 20, 0]];
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const p = (i / 255) * (stops.length - 1), k = Math.min(p | 0, stops.length - 2), f = p - k;
+    for (let c = 0; c < 3; c++) lut[i * 3 + c] = Math.round(stops[k][c] * (1 - f) + stops[k + 1][c] * f);
+  }
+  return lut;
+})();
+function heatmap(x, y, w, h) {
+  pixelOp(x, y, w, h, (d) => {
+    let lo = 255, hi = 0;  // stretch the contrast of what is inside the frame
+    for (let j = 0; j < d.length; j += 16) { const g = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2]; if (g < lo) lo = g; if (g > hi) hi = g; }
+    const s = 255 / Math.max(hi - lo, 40);
+    for (let j = 0; j < d.length; j += 4) {
+      const g = Math.min(255, Math.max(0, (0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2] - lo) * s)) | 0;
+      d[j] = JET[g * 3]; d[j + 1] = JET[g * 3 + 1]; d[j + 2] = JET[g * 3 + 2];
+    }
+  });
+}
 function purpleGlass(x, y, w, h) {
   copyRegion(x, y, w, h);
   xctx.fillStyle = "rgba(130,20,160,0.65)";
@@ -390,6 +497,7 @@ function facePixel(x, y, w, h, t, faces) {
 }
 
 const FILTERS = [
+  { name: "Heatmap", fn: heatmap, edge: [80, 255, 140] },
   { name: "Neon Edges", fn: neonEdges, edge: [255, 100, 255] },
   { name: "Line Art", fn: lineArt, edge: [200, 60, 255] },
   { name: "Thermal", fn: thermal, edge: [255, 80, 180] },
@@ -405,10 +513,130 @@ const FILTERS = [
 let filterIdx = 0;
 function setFilter(i) {
   filterIdx = ((i % FILTERS.length) + FILTERS.length) % FILTERS.length;
+  if (AI.on) aiStop();  // picking a free filter switches back from Live AI
   toast(`Filter: ${FILTERS[filterIdx].name}`);
-  portal.flash = performance.now() / 1000 + 0.3;
+  flashUntil = performance.now() / 1000 + 0.3;
   if (FILTERS[filterIdx].face) ensureFace();
+  syncModeBar();
 }
+
+// ---------------------------------------------------------------- Live AI (Decart real-time restyle)
+// The whole mirrored camera frame is streamed to Decart; the restyled stream comes back into
+// aiVideo and is drawn only inside the portals. It lags the camera a little (network + model).
+const SDK_URL = "https://esm.sh/@decartai/sdk@0.2.14";
+// tuned to the reference clip: a hand-drawn anime character in the same pose, clothes and room
+const DEFAULT_PROMPT = "Turn the person into a 2D Japanese anime character, modern TV anime style: large glossy anime eyes "
+  + "with highlights, small nose and mouth, clean thin black line art, flat cel shading with soft shadows, smooth skin, "
+  + "glossy anime hair with strands. Keep the same pose, expression, clothes and background, all redrawn as a hand-drawn anime frame. Bright, soft colours.";
+const OLD_PROMPTS = ["Anime style, 2D cel-shaded Japanese animation, clean line art, big expressive eyes, soft pastel colours"];
+const savedPrompt = localStorage.getItem("hp.prompt");
+const AI_IDLE_OFF = 60;  // seconds without any portal before Live AI disconnects (it bills per second)
+const aiVideo = $("aiVideo");
+const AI = { on: false, state: "off", sdk: null, rt: null, stream: null, send: null, sendCtx: null, lastPortal: 0, gen: 0 };
+const store = { get: (k) => sessionStorage.getItem(k) ?? localStorage.getItem(k), };
+const settings = {
+  key: store.get("hp.decartKey") || "",
+  remember: !!localStorage.getItem("hp.decartKey"),
+  prompt: savedPrompt && !OLD_PROMPTS.includes(savedPrompt) ? savedPrompt : DEFAULT_PROMPT,
+  model: localStorage.getItem("hp.model") || "lucy-restyle-2",
+};
+const aiReady = () => AI.on && aiVideo.readyState >= 2 && aiVideo.videoWidth > 0;
+
+function aiPump() {  // copy the current camera frame into the outgoing stream canvas (cover-fit)
+  if (!AI.send) return;
+  const sw = AI.send.width, sh = AI.send.height, s = Math.max(sw / W, sh / H);
+  AI.sendCtx.drawImage(frame, (sw - W * s) / 2, (sh - H * s) / 2, W * s, H * s);
+}
+function aiDrawInto(g) {  // inverse of aiPump: lay the AI frame over the camera frame coordinates
+  const sw = AI.send.width, sh = AI.send.height, s = Math.max(sw / W, sh / H);
+  g.drawImage(aiVideo, (W - sw / s) / 2, (H - sh / s) / 2, sw / s, sh / s);
+}
+
+async function aiStart() {
+  if (!settings.key) { openSettings("Paste your Decart API key to turn on Live AI."); return; }
+  const gen = ++AI.gen;
+  AI.on = true; AI.state = "connecting"; AI.lastPortal = performance.now() / 1000;
+  syncModeBar();
+  toast("Connecting to Live AI…", 2);
+  try {
+    AI.sdk ??= await import(SDK_URL);
+    const { createDecartClient, models, resolveFpsNumber } = AI.sdk;
+    const model = models.realtime(settings.model);
+    AI.send = mk(); AI.send.width = model.width; AI.send.height = model.height;
+    AI.sendCtx = AI.send.getContext("2d");
+    aiPump();
+    AI.stream = AI.send.captureStream(resolveFpsNumber ? resolveFpsNumber(model.fps) : 25);
+    const client = createDecartClient({ apiKey: settings.key });
+    const rt = await client.realtime.connect(AI.stream, {
+      model, mirror: false,
+      onRemoteStream: (s) => { aiVideo.srcObject = s; aiVideo.play().catch(() => {}); },
+      initialState: { prompt: { text: settings.prompt, enhance: true } },
+    });
+    if (gen !== AI.gen) { rt.disconnect(); return; }  // switched off while connecting
+    AI.rt = rt;
+    AI.state = rt.getConnectionState?.() ?? "connected";
+    rt.on("connectionChange", (s) => {
+      if (gen !== AI.gen) return;
+      AI.state = s;
+      if (s === "disconnected") aiStop("Live AI disconnected");
+    });
+    rt.on("error", (e) => { console.error("Decart", e); if (gen === AI.gen) toast(aiError(e), 4); });
+    rt.on("sessionEnded", (r) => { if (gen === AI.gen) aiStop(`Live AI session ended${r?.reason ? ` (${r.reason})` : ""}`); });
+    toast("Live AI on. Make an L with both hands");
+  } catch (e) {
+    console.error(e);
+    if (gen !== AI.gen) return;
+    aiStop(aiError(e));
+    if (e?.code === "INVALID_API_KEY") openSettings("That API key was refused. Check it and try again.");
+  }
+}
+function aiError(e) {
+  const code = e?.code || "", msg = e?.message || String(e);
+  if (code === "INVALID_API_KEY") return "Live AI: the API key was refused";
+  if (/Failed to fetch|import/i.test(msg) && !AI.sdk) return "Live AI: could not load the Decart SDK (offline?)";
+  return `Live AI: ${msg.slice(0, 80)}`;
+}
+function aiStop(msg) {
+  AI.gen++;
+  try { AI.rt?.disconnect(); } catch {}
+  AI.stream?.getTracks().forEach((t) => t.stop());
+  aiVideo.srcObject = null;
+  Object.assign(AI, { on: false, state: "off", rt: null, stream: null, send: null, sendCtx: null });
+  if (msg) toast(msg, 3);
+  syncModeBar();
+}
+
+function syncModeBar() {
+  $("localName").textContent = FILTERS[filterIdx].name;
+  $("localBtn").setAttribute("aria-pressed", String(!AI.on));
+  $("aiBtn").setAttribute("aria-pressed", String(AI.on));
+}
+function openSettings(msg) {
+  if (msg) $("settingsMsg").textContent = msg;
+  $("apiKey").value = settings.key;
+  $("rememberKey").checked = settings.remember;
+  $("aiPrompt").value = settings.prompt;
+  $("aiModel").value = settings.model;
+  $("settings").showModal();
+}
+$("settings").addEventListener("close", () => {
+  if ($("settings").returnValue !== "save") return;
+  const oldModel = settings.model;
+  settings.key = $("apiKey").value.trim();
+  settings.remember = $("rememberKey").checked;
+  settings.prompt = $("aiPrompt").value.trim() || DEFAULT_PROMPT;
+  settings.model = $("aiModel").value;
+  localStorage.removeItem("hp.decartKey"); sessionStorage.removeItem("hp.decartKey");
+  if (settings.key) (settings.remember ? localStorage : sessionStorage).setItem("hp.decartKey", settings.key);
+  localStorage.setItem("hp.prompt", settings.prompt);
+  localStorage.setItem("hp.model", settings.model);
+  if (AI.on && AI.rt && oldModel === settings.model) { AI.rt.setPrompt(settings.prompt, { enhance: true }); toast("Style updated"); }
+  else if (AI.on) { aiStop(); aiStart(); }
+  else if (settings.key && running) aiStart();
+});
+$("localBtn").addEventListener("click", () => (AI.on ? aiStop() : setFilter(filterIdx + 1)));
+$("aiBtn").addEventListener("click", () => (AI.on ? aiStop("Live AI off") : aiStart()));
+$("gear").addEventListener("click", () => openSettings());
 
 // ---------------------------------------------------------------- stickers
 class Item {
@@ -612,8 +840,9 @@ function layoutButtons() {
 const pinchState = new Map();  // label -> {was, holdStart, fired}
 let fistCount = 0, cooldown = 0, showHands = false, showFps = false, fps = 30, prevNow = 0, trackMs = 0, frameMs = 0;
 let drawingSet = new Set(), framingSet = new Set();
-const PORTAL_GRACE = 6;  // frames the portal survives a tracking dropout
-const portal = { euro: [0, 1, 2, 3].map(() => new Euro(1.0, 0.01)), poly: null, open: 0, miss: 99, flash: 0 };
+const PORTAL_GRACE = 6;  // frames a portal survives a tracking dropout
+const portals = new Map();  // "h1|h2" -> { euro, poly, open, miss, hands }
+let flashUntil = 0;
 const polyArea = (P) => Math.abs(P.reduce((s, p, i) => { const q = P[(i + 1) % P.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
 
 function step(now) {
@@ -676,7 +905,7 @@ function step(now) {
     if (st.holdStart !== null && now - st.holdStart >= PINCH_HOLD) { st.holdStart = null; st.fired = true; pinchFire = true; }
   }
   fistCount = hands.some((h) => h.isFist) ? fistCount + 1 : 0;
-  if ((pinchFire || fistCount === FIST_FRAMES) && now > cooldown) { setFilter(filterIdx + 1); cooldown = now + 0.8; }
+  if ((pinchFire || fistCount === FIST_FRAMES) && now > cooldown && !AI.on) { setFilter(filterIdx + 1); cooldown = now + 0.8; }
 
   // move / resize / rotate grabbed stickers
   const held = new Map();
@@ -704,24 +933,59 @@ function step(now) {
     }
   }
 
-  // portal: both hands in an L. Once open, the thumb test relaxes so it does not flicker.
-  const wasOpen = portal.miss < PORTAL_GRACE;
-  const thumbMin = wasOpen ? THUMB_OUT * 0.7 : THUMB_OUT;
-  const framing = hands.filter((h) => h.up[0] && h.thumbRatio > thumbMin && !h.pinched && !h.isFist && !grabs.has(h.label));
-  let found = false;
-  if (framing.length >= 2) {
-    const [a, b] = framing.slice(0, 2).sort((p, q) => p.pts[0][0] - q.pts[0][0]);
-    if (!wasOpen) portal.euro.forEach((e) => (e.x = null));
-    const c = [a.index, a.thumb, b.index, b.thumb].map((p, i) => portal.euro[i].filter(p, now));
+  // portals: two hands in an L make one. With two people, pair the hands that are closest
+  // together (relative to hand size), keeping last frame's pairs when they still work.
+  // Once a hand is framing, the thumb test relaxes so the portal does not flicker.
+  const liveHands = new Set();
+  for (const p of portals.values()) if (p.miss < PORTAL_GRACE) p.hands.forEach((l) => liveHands.add(l));
+  const framing = hands.filter((h) => h.up[0] && !h.pinched && !h.isFist && !grabs.has(h.label)
+    && h.thumbRatio > (liveHands.has(h.label) ? THUMB_OUT * 0.7 : THUMB_OUT));
+  const centre = (h) => mid(h.index, h.thumb);
+  const cand = [];
+  for (let i = 0; i < framing.length; i++) {
+    for (let j = i + 1; j < framing.length; j++) {
+      const a = framing[i], b = framing[j];
+      const cost = dist(centre(a), centre(b)) / ((a.size + b.size) / 2);
+      const key = [a.label, b.label].sort().join("|");
+      if (cost < 9) cand.push([portals.has(key) ? cost - 4 : cost, a, b, key]);
+    }
+  }
+  cand.sort((p, q) => p[0] - q[0]);
+  const paired = new Set(), seenKeys = new Set();
+  for (const [, a0, b0, key] of cand) {
+    if (paired.has(a0.label) || paired.has(b0.label)) continue;
+    const [a, b] = [a0, b0].sort((p, q) => p.pts[0][0] - q.pts[0][0]);
+    let P = portals.get(key);
+    if (!P) {
+      // a hand that got a new id (fast move, brief dropout) keeps its portal: take over a
+      // portal not seen this frame that shares a hand or sits where this pair is
+      const pc = mid(centre(a), centre(b)), near = (a.size + b.size) * 1.2;
+      for (const [k2, Q] of portals) {
+        if (seenKeys.has(k2) || !Q.poly) continue;
+        const qc = [Q.poly.reduce((s, p) => s + p[0], 0) / 4, Q.poly.reduce((s, p) => s + p[1], 0) / 4];
+        if (Q.hands.some((l) => l === a.label || l === b.label) || dist(pc, qc) < near) {
+          portals.delete(k2); P = Q; P.hands = [a.label, b.label]; portals.set(key, P); break;
+        }
+      }
+    }
+    if (!P) portals.set(key, (P = { euro: [0, 1, 2, 3].map(() => new Euro(1.0, 0.01)), poly: null, open: 0, miss: 99, hands: [a.label, b.label] }));
+    if (P.miss >= PORTAL_GRACE) P.euro.forEach((e) => (e.x = null));
+    const c = [a.index, a.thumb, b.index, b.thumb].map((p, i) => P.euro[i].filter(p, now));
     const cx = (c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, cy = (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4;
     // join corners by angle around the centre so tilted hands never make a crossed "bow-tie"
     c.sort((p, q) => Math.atan2(p[1] - cy, p[0] - cx) - Math.atan2(q[1] - cy, q[0] - cx));
-    if (polyArea(c) > W * H * 0.004) { portal.poly = c; found = true; framingSet = new Set([a.label, b.label]); }
+    if (polyArea(c) > W * H * 0.004) { P.poly = c; seenKeys.add(key); paired.add(a.label); paired.add(b.label); }
   }
-  portal.miss = found ? 0 : portal.miss + 1;
-  if (portal.miss >= PORTAL_GRACE) framingSet = new Set();  // keep the framing hands marked through short dropouts
-  const target = portal.miss < PORTAL_GRACE ? 1 : 0;
-  portal.open = Math.min(1, Math.max(0, portal.open + (target ? dt / 0.22 : -dt / 0.16)));
+  framingSet = new Set();
+  for (const [key, P] of portals) {
+    P.miss = seenKeys.has(key) ? 0 : P.miss + 1;
+    if (P.miss < PORTAL_GRACE) P.hands.forEach((l) => framingSet.add(l));  // keep the hands marked through short dropouts
+    P.open = Math.min(1, Math.max(0, P.open + (P.miss < PORTAL_GRACE ? dt / 0.22 : -dt / 0.16)));
+    if (P.open <= 0 && P.miss >= PORTAL_GRACE) portals.delete(key);
+  }
+  if (portals.size) AI.lastPortal = now;
+  if (AI.on && now - AI.lastPortal > AI_IDLE_OFF) aiStop("Live AI off: no portal for a minute");
+  if (AI.on) aiPump();
 
   // drawing: point with the index finger, thumb tucked. Short dropouts do not break the stroke.
   drawingSet = new Set();
@@ -737,7 +1001,7 @@ function step(now) {
 
   // ---- compose the scene: camera -> portal -> ink (+ cheap glow) -> stickers
   sctx.drawImage(frame, 0, 0);
-  renderPortal(now);
+  renderPortals(now);
   if (inkDirty) {
     gctx.clearRect(0, 0, glow.width, glow.height);
     gctx.filter = "blur(2px)";
@@ -758,8 +1022,21 @@ function step(now) {
   frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
 }
 
-function renderPortal(now) {
-  if (portal.open <= 0 || !portal.poly) return;
+const AI_EDGE = [120, 230, 170];
+function renderPortals(now) {
+  const open = [...portals.values()].filter((P) => P.open > 0 && P.poly);
+  if (!open.length) return;
+  const f = FILTERS[filterIdx], useAI = aiReady();
+  let faces = [];
+  if (!useAI && f.face) {
+    if (faceLm) faces = faceLm.detectForVideo(video, ts).faceLandmarks.map((pts) => pts.map((p) => [(mirror ? 1 - p.x : p.x) * W, p.y * H]));
+    else ensureFace();
+  }
+  if (useAI) aiDrawInto(xctx);  // one draw of the whole AI frame serves every portal
+  for (const P of open) renderPortal(P, now, f, useAI, faces);
+}
+
+function renderPortal(portal, now, f, useAI, faces) {
   const e = 1 - Math.pow(1 - portal.open, 3);  // ease-out
   const P = portal.poly;
   const cx = P.reduce((s, p) => s + p[0], 0) / 4, cy = P.reduce((s, p) => s + p[1], 0) / 4, k = 0.6 + 0.4 * e;
@@ -768,24 +1045,24 @@ function renderPortal(now) {
   const x = Math.max(0, Math.floor(Math.min(...xs))), y = Math.max(0, Math.floor(Math.min(...ys)));
   const w = Math.min(W, Math.ceil(Math.max(...xs))) - x, h = Math.min(H, Math.ceil(Math.max(...ys))) - y;
   if (w < 4 || h < 4) return;
-  const f = FILTERS[filterIdx];
-  let faces = [];
-  if (f.face) {
-    if (faceLm) faces = faceLm.detectForVideo(video, ts).faceLandmarks.map((pts) => pts.map((p) => [(mirror ? 1 - p.x : p.x) * W, p.y * H]));
-    else ensureFace();
-  }
-  f.fn(x, y, w, h, now, faces);
+  const connecting = AI.on && !useAI;
+  if (!useAI) f.fn(x, y, w, h, now, faces);  // while Live AI connects, the free filter fills in
 
   const path = () => { sctx.beginPath(); poly.forEach((p, i) => (i ? sctx.lineTo(...p) : sctx.moveTo(...p))); sctx.closePath(); };
   sctx.save();
   sctx.globalAlpha = e;
   path(); sctx.clip();
   sctx.drawImage(fx, x, y, w, h, x, y, w, h);
-  if (portal.flash > now) { sctx.fillStyle = `rgba(255,255,255,${(0.55 * (portal.flash - now)) / 0.3})`; sctx.fillRect(x, y, w, h); }
+  if (flashUntil > now) { sctx.fillStyle = `rgba(255,255,255,${(0.55 * (flashUntil - now)) / 0.3})`; sctx.fillRect(x, y, w, h); }
+  if (connecting) {
+    sctx.fillStyle = "rgba(10,8,20,0.45)"; sctx.fillRect(x, y, w, h);
+    sctx.font = "600 15px 'Space Grotesk', system-ui, sans-serif"; sctx.textAlign = "center"; sctx.textBaseline = "middle";
+    sctx.fillStyle = "#fff"; sctx.fillText(`Live AI ${AI.state}${".".repeat(1 + (Math.floor(now * 3) % 3))}`, cx, cy);
+  }
   sctx.restore();
 
   // edge: layered glow (cheaper and softer than shadowBlur), crisp core, a light running around it
-  const col = f.edge;
+  const col = useAI || connecting ? AI_EDGE : f.edge;
   sctx.save();
   sctx.globalAlpha = e; sctx.lineJoin = "round"; sctx.lineCap = "round";
   for (const [lw, a] of [[20, 0.07], [11, 0.15], [5, 0.5]]) { path(); sctx.lineWidth = lw; sctx.strokeStyle = rgb(col, a); sctx.stroke(); }
@@ -817,18 +1094,19 @@ function drawUI(hands, now) {
   g.restore();
   buttons.forEach((b, i) => b.draw(g, now, i < COLORS.length ? !eraser && inkColor === COLORS[i][1] : i === COLORS.length && eraser));
 
-  // current filter chip
-  const f = FILTERS[filterIdx], sub = `${filterIdx + 1}/${FILTERS.length}`;
+  // status line: what the tracker sees and whether Live AI is up
+  const aiText = !AI.on ? "off" : aiReady() && (AI.state === "connected" || AI.state === "generating") ? "live" : AI.state;
+  const mode = AI.on ? "Live AI" : FILTERS[filterIdx].name;
+  const nFraming = hands.filter((h) => framingSet.has(h.label)).length;
+  const hud = `${nFraming ? "Framing" : "Tracking"} ${nFraming}/${hands.length} hands   ${fps.toFixed(0)} FPS   ${delegate}   AI: ${aiText}   ${mode}`
+    + (showFps ? `   track ${trackMs.toFixed(0)} ms · frame ${frameMs.toFixed(0)} ms` : "");
   g.save();
-  g.font = "600 15px 'Space Grotesk', system-ui, sans-serif"; const lw = g.measureText(f.name).width;
-  g.font = "500 12px Inter, system-ui, sans-serif"; const sw = g.measureText(sub).width;
-  const cx0 = 16, cy0 = BAR_H + 6, ch = 32;
-  pill(g, cx0, cy0, 14 + 10 + 9 + lw + 9 + sw + 14, ch);
-  g.beginPath(); g.arc(cx0 + 19, cy0 + ch / 2, 5, 0, TAU); g.fillStyle = rgb(f.edge); g.fill();
-  g.textBaseline = "middle"; g.textAlign = "left";
-  g.font = "600 15px 'Space Grotesk', system-ui, sans-serif"; g.fillStyle = "#fff"; g.fillText(f.name, cx0 + 33, cy0 + ch / 2 + 1);
-  g.font = "500 12px Inter, system-ui, sans-serif"; g.fillStyle = "#9a94b5"; g.fillText(sub, cx0 + 33 + lw + 9, cy0 + ch / 2 + 1);
-  if (showFps) { g.textAlign = "right"; g.fillStyle = "rgb(140,255,160)"; g.fillText(`${fps.toFixed(0)} fps · tracking ${trackMs.toFixed(0)} ms · frame ${frameMs.toFixed(0)} ms`, W - 16, cy0 + ch / 2); }
+  g.font = "500 12.5px ui-monospace, 'Cascadia Mono', Consolas, monospace"; g.textBaseline = "middle"; g.textAlign = "left";
+  const hx = 16, hy = BAR_H + 6, hh = 28, hwid = g.measureText(hud).width + 40;
+  pill(g, hx, hy, hwid, hh);
+  g.beginPath(); g.arc(hx + 15, hy + hh / 2, 4, 0, TAU);
+  g.fillStyle = aiText === "live" ? "rgb(110,240,160)" : AI.on ? "rgb(255,200,80)" : rgb(FILTERS[filterIdx].edge); g.fill();
+  g.fillStyle = "#e6e2f5"; g.fillText(hud, hx + 27, hy + hh / 2 + 1);
   g.restore();
 
   // grabbed stickers
@@ -857,26 +1135,15 @@ function drawUI(hands, now) {
     }
   }
 
-  // hint
-  g.save();
-  g.font = "500 12.5px Inter, system-ui, sans-serif"; g.textBaseline = "middle"; g.textAlign = "center";
-  const hint = W > 900
-    ? "Both hands in an L: portal   ·   Point, thumb tucked: draw   ·   Pinch a sticker: move   ·   Fist or hold a pinch: next filter"
-    : "L-hands: portal · Point: draw · Pinch: move · Fist: filter";
-  const hw = g.measureText(hint).width + 32;
-  pill(g, (W - hw) / 2, H - 42, hw, 28);
-  g.fillStyle = "#cfcae6"; g.fillText(hint, W / 2, H - 28 + 0.5);
-  g.restore();
-
-  // toast
+  // toast (sits above the HTML mode bar)
   const left = toastUntil - performance.now() / 1000;
   if (left > 0) {
     g.save();
     g.globalAlpha = Math.min(1, left / 0.25);
     g.font = "600 18px 'Space Grotesk', system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
     const tw = g.measureText(toastMsg).width + 44;
-    pill(g, (W - tw) / 2, H - 98, tw, 40, "rgba(10,8,20,0.82)");
-    g.fillStyle = "#fff"; g.fillText(toastMsg, W / 2, H - 78 + 1);
+    pill(g, (W - tw) / 2, H - 120, tw, 40, "rgba(10,8,20,0.82)");
+    g.fillStyle = "#fff"; g.fillText(toastMsg, W / 2, H - 100 + 1);
     g.restore();
   }
 }
@@ -916,6 +1183,8 @@ async function begin() {
   await video.play();
   sizeTo(video.videoWidth, video.videoHeight);
   $("intro").hidden = true;
+  $("modes").hidden = false;
+  syncModeBar();
   running = true;
   toast("Make an L with both hands");
   requestAnimationFrame(loop);
@@ -948,9 +1217,10 @@ $("file").addEventListener("change", async (e) => {
 });
 
 addEventListener("keydown", (e) => {
-  if (!running) return;
+  if (!running || $("settings").open || e.target.closest?.("input, textarea, select")) return;
   const k = e.key.toLowerCase();
-  if (k >= "1" && k <= "9") setFilter(+k - 1);
+  if (k === "a") AI.on ? aiStop("Live AI off") : aiStart();
+  else if (k >= "1" && k <= "9") setFilter(+k - 1);
   else if (k === "0") setFilter(9);
   else if (k === "n") setFilter(filterIdx + 1);
   else if (k === "b") setFilter(filterIdx - 1);
