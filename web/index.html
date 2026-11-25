@@ -90,7 +90,7 @@
 <body>
 <main id="stage"><div id="view"><canvas id="scene"></canvas><canvas id="ui"></canvas>
   <nav id="modes" hidden aria-label="Portal mode">
-    <button id="localBtn" aria-pressed="true" title="Click for the next free filter (or make a fist)"><span id="localName">Heatmap</span> <span class="tag">· Free</span></button>
+    <button id="localBtn" aria-pressed="true" title="Click for the next free filter (or make a fist)"><span id="localName">Anime</span> <span class="tag">· Free</span></button>
     <button id="aiBtn" aria-pressed="false" title="Turn the inside of the portal into anime with Decart's real-time AI (A)">Live AI</button>
     <button id="gear" aria-label="Live AI settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
   </nav>
@@ -130,7 +130,7 @@
     <p class="lede">Filters, drawing and stickers, all controlled with your hands at the same time. Nothing leaves your computer: the camera is processed in this browser tab.</p>
     <ul class="moves">
       <li><b>Open a portal</b><span>Make an L with thumb and index on both hands. The filter shows inside the frame. Two people can each open their own.</span></li>
-      <li><b>Live AI</b><span>Turn on Live AI at the bottom to see yourself as anime inside the frame (needs a Decart API key).</span></li>
+      <li><b>Anime</b><span>The free Anime filter (on by default) turns the inside of the frame into a cartoon with big anime eyes. For a full AI anime redraw, turn on Live AI at the bottom (needs a Decart API key).</span></li>
       <li><b>Change filter</b><span>Hold a pinch on empty space, or make a fist.</span></li>
       <li><b>Draw</b><span>Point with your index finger, thumb tucked in. Hover the colour buttons at the top to change colour.</span></li>
       <li><b>Move stickers</b><span>Pinch a sticker to drag it. Pinch it with both hands to resize and rotate.</span></li>
@@ -496,7 +496,110 @@ function facePixel(x, y, w, h, t, faces) {
   }
 }
 
+// Free anime: runs entirely in the browser. Cel shading (smoothed colour, a few flat light bands,
+// stronger saturation) with dark ink outlines, then big glossy anime eyes and blush drawn on each face.
+const TOON_LEVELS = 4;  // brightness steps of the flat shading
+function toonShade(x, y, w, h) {
+  const sw = Math.max(2, Math.round(w * K)), sh = Math.max(2, Math.round(h * K));
+  if (tmp.width !== sw || tmp.height !== sh) { tmp.width = sw; tmp.height = sh; }
+  tctx.save();
+  tctx.filter = "blur(1.6px) saturate(1.0) brightness(1.1)";  // smooth skin and noise before banding
+  tctx.drawImage(frame, x, y, w, h, 0, 0, sw, sh);
+  tctx.restore();
+  const img = tctx.getImageData(0, 0, sw, sh), d = img.data;
+  const m = edgeMask(d, sw, sh, 80, 170);
+  for (let i = 0, j = 0; i < sw * sh; i++, j += 4) {
+    const r = d[j], g = d[j + 1], b = d[j + 2];
+    const L = Math.max(1, 0.299 * r + 0.587 * g + 0.114 * b), v = (L / 255) * TOON_LEVELS;
+    const fl = Math.min(Math.floor(v), TOON_LEVELS - 1), f = v - fl;
+    const step = f < 0.4 ? 0 : f > 0.6 ? 1 : (f - 0.4) / 0.2;  // flat bands with a short soft edge
+    const out = 0.2 + 0.82 * Math.pow(Math.min(1, (fl + step) / TOON_LEVELS), 0.8);  // lifted: no crushed blacks
+    const a = Math.min(0.9, m[i] / 255);  // ink line strength
+    const p = 0.2 * out * out;  // paler, softer colours in the lit bands (anime skin)
+    const o = out * 255, c = 1.0;  // new flat brightness + the original colour offset (keeps hue, not over-saturated)
+    d[j] = (Math.min(255, o + (r - L) * c) * (1 - p) + 255 * p) * (1 - a) + 34 * a;
+    d[j + 1] = (Math.min(255, o + (g - L) * c) * (1 - p) + 248 * p) * (1 - a) + 22 * a;
+    d[j + 2] = (Math.min(255, o + (b - L) * c) * (1 - p) + 250 * p) * (1 - a) + 38 * a;
+  }
+  tctx.putImageData(img, 0, 0);
+  xctx.drawImage(tmp, 0, 0, sw, sh, x, y, w, h);
+}
+function animeEye(c, ew, open, ang, outer) {
+  // c: eye centre, ew: eye width, open: 0 (shut) .. 1, outer: +1/-1 which way the outer corner points
+  const g = xctx, rx = ew * 0.6, ry = ew * 0.7 * (0.6 + 0.4 * open), INK = "#24151a";
+  g.save();
+  g.translate(c[0], c[1] - ew * 0.06); g.rotate(ang);
+  g.lineCap = "round"; g.lineJoin = "round";
+  if (open < 0.12) {  // blink: a soft closed-eye curve
+    g.strokeStyle = INK; g.lineWidth = Math.max(2, ew * 0.1);
+    g.beginPath(); g.moveTo(-rx, 0); g.quadraticCurveTo(0, ew * 0.18, rx, 0); g.stroke();
+    g.restore(); return;
+  }
+  // eye shape: flat-ish top, rounder bottom (drawn as two curves)
+  const shape = () => {
+    g.beginPath();
+    g.moveTo(-rx, -ry * 0.15);
+    g.bezierCurveTo(-rx * 0.6, -ry * 1.05, rx * 0.6, -ry * 1.05, rx, -ry * 0.15);
+    g.bezierCurveTo(rx * 0.9, ry * 1.0, -rx * 0.9, ry * 1.0, -rx, -ry * 0.15);
+    g.closePath();
+  };
+  shape(); g.fillStyle = "#fffafa"; g.fill();
+  g.save(); shape(); g.clip();
+  const ix = 0, iy = ry * 0.05, irx = rx * 0.62, iry = ry * 0.98;
+  const grad = g.createLinearGradient(0, iy - iry, 0, iy + iry);
+  grad.addColorStop(0, "#1e0f0c"); grad.addColorStop(0.45, "#5a2c1a"); grad.addColorStop(0.85, "#b9672e"); grad.addColorStop(1, "#e8a65c");
+  g.beginPath(); g.ellipse(ix, iy, irx, iry, 0, 0, Math.PI * 2); g.fillStyle = grad; g.fill();  // iris
+  g.beginPath(); g.ellipse(ix, iy - iry * 0.05, irx * 0.45, iry * 0.5, 0, 0, Math.PI * 2); g.fillStyle = "rgba(15,6,6,0.9)"; g.fill();  // pupil
+  g.fillStyle = "rgba(40,20,30,0.25)"; g.fillRect(-rx, -ry, rx * 2, ry * 0.5);  // lid shadow
+  g.fillStyle = "#fff";
+  g.beginPath(); g.ellipse(ix - irx * 0.3 * outer, iy - iry * 0.22, irx * 0.36, iry * 0.26, 0, 0, Math.PI * 2); g.fill();  // big shine
+  g.beginPath(); g.arc(ix + irx * 0.38 * outer, iy + iry * 0.45, irx * 0.13, 0, Math.PI * 2); g.fill();  // small shine
+  g.restore();
+  // upper lash: a thick curve that gets heavier toward the outer corner, with a flick
+  g.fillStyle = INK; g.strokeStyle = INK;
+  const t = Math.max(2, ew * 0.07), o = outer;
+  g.beginPath();
+  g.moveTo(-o * rx * 1.02, -ry * 0.1);
+  g.bezierCurveTo(-o * rx * 0.6, -ry * 1.1, o * rx * 0.6, -ry * 1.1, o * rx * 1.05, -ry * 0.2);
+  g.lineTo(o * rx * 1.32, -ry * 0.55);
+  g.lineTo(o * rx * 1.05, -ry * 0.05 + t);
+  g.bezierCurveTo(o * rx * 0.6, -ry * 1.05 + t * 2.2, -o * rx * 0.6, -ry * 1.05 + t * 1.2, -o * rx * 1.02, -ry * 0.1);
+  g.closePath(); g.fill();
+  g.lineWidth = Math.max(1, ew * 0.035);  // short lower line at the outer side
+  g.beginPath(); g.moveTo(o * rx * 0.2, ry * 0.78); g.quadraticCurveTo(o * rx * 0.75, ry * 0.6, o * rx * 0.95, ry * 0.2); g.stroke();
+  g.restore();
+}
+function anime(x, y, w, h, t, faces) {
+  toonShade(x, y, w, h);
+  for (const p of faces) {
+    const eyes = [  // [outer corner, inner corner, top, bottom, iris]
+      [33, 133, 159, 145, 468],
+      [263, 362, 386, 374, 473],
+    ];
+    const roll = Math.atan2(p[263][1] - p[33][1], p[263][0] - p[33][0]);
+    const faceMidX = (p[33][0] + p[263][0]) / 2;
+    let ewMax = 0;
+    for (const [o, i] of eyes) ewMax = Math.max(ewMax, dist(p[o], p[i]));
+    for (const [o, i, tp, bt, ir] of eyes) {
+      const ew = Math.max(dist(p[o], p[i]), ewMax * 0.8);  // keep both eyes similar when the head turns
+      const open = Math.min(1, Math.max(0, (dist(p[tp], p[bt]) / dist(p[o], p[i]) - 0.07) / 0.16));
+      const c = p.length > ir ? [(p[ir][0] * 0.4 + (p[o][0] + p[i][0]) * 0.3), (p[ir][1] * 0.4 + (p[o][1] + p[i][1]) * 0.3)]
+        : [(p[o][0] + p[i][0]) / 2, (p[o][1] + p[i][1]) / 2];
+      const outer = Math.sign(p[o][0] - faceMidX) || 1;
+      animeEye(c, ew, open, roll, outer);
+    }
+    // blush on both cheeks
+    const ed = dist(p[33], p[263]);
+    xctx.save();
+    xctx.filter = `blur(${Math.max(2, ed * 0.06)}px)`;
+    xctx.fillStyle = "rgba(255,110,140,0.45)";
+    for (const k of [205, 425]) { xctx.beginPath(); xctx.ellipse(p[k][0], p[k][1], ed * 0.17, ed * 0.09, roll, 0, Math.PI * 2); xctx.fill(); }
+    xctx.restore();
+  }
+}
+
 const FILTERS = [
+  { name: "Anime", fn: anime, edge: [255, 140, 200], face: true },
   { name: "Heatmap", fn: heatmap, edge: [80, 255, 140] },
   { name: "Neon Edges", fn: neonEdges, edge: [255, 100, 255] },
   { name: "Line Art", fn: lineArt, edge: [200, 60, 255] },
